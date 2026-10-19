@@ -43,3 +43,6 @@ lib*.pc
 /Release/
 /tmp_install/
 /portlock/
+
+# Diamond-PG out-of-tree build, database and validation output.
+/scripts/diamond-pg/.work/
