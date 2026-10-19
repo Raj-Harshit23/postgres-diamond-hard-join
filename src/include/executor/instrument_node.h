@@ -20,7 +20,8 @@
 
 /*
  * Offset added to plan_node_id to create a second TOC key for per-worker scan
- * instrumentation. Instrumentation and parallel-awareness are independent, so
+ * instrumentation (also used by Diamond-PG HashJoin instrumentation).
+ * Instrumentation and parallel-awareness are independent, so
  * separate DSM chunks let each be allocated and initialized only when needed.
  * In the future, if nodes need more DSM allocations, we would need a more
  * robust system.
@@ -261,6 +262,25 @@ typedef struct SharedHashInfo
 	int			num_workers;
 	HashInstrumentation hinstrument[FLEXIBLE_ARRAY_MEMBER];
 } SharedHashInfo;
+
+/*
+ * Diamond-PG: observed native HashJoin work, before residual qualifications.
+ * A probe is counted only in its resident batch; build_matches counts pairs,
+ * not distinct build rows.  These counters are additive across rescans and
+ * workers, unlike the maxima in HashInstrumentation above.
+ */
+typedef struct DiamondHashJoinInstrumentation
+{
+	uint64		probes;
+	uint64		successful_probes;
+	uint64		build_matches;
+} DiamondHashJoinInstrumentation;
+
+typedef struct SharedDiamondHashJoinInfo
+{
+	int			num_workers;
+	DiamondHashJoinInstrumentation stats[FLEXIBLE_ARRAY_MEMBER];
+} SharedDiamondHashJoinInfo;
 
 
 /* ---------------------

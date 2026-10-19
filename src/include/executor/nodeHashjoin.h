@@ -18,6 +18,8 @@
 #include "nodes/execnodes.h"
 #include "storage/buffile.h"
 
+extern PGDLLIMPORT bool diamond_hashjoin_stats;
+
 extern HashJoinState *ExecInitHashJoin(HashJoin *node, EState *estate, int eflags);
 extern void ExecEndHashJoin(HashJoinState *node);
 extern void ExecReScanHashJoin(HashJoinState *node);
@@ -27,6 +29,7 @@ extern void ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcx
 extern void ExecHashJoinReInitializeDSM(HashJoinState *state, ParallelContext *pcxt);
 extern void ExecHashJoinInitializeWorker(HashJoinState *state,
 										 ParallelWorkerContext *pwcxt);
+extern void ExecHashJoinRetrieveInstrumentation(HashJoinState *state);
 
 extern void ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,
 								  BufFile **fileptr, HashJoinTable hashtable);

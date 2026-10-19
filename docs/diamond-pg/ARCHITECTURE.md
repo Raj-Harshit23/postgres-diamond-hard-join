@@ -1,8 +1,8 @@
 # Diamond-PG architecture and Phase 0 source map
 
-Last audited: 2026-10-19. **Status: documentation only. No Diamond execution,
-planner paths, counters, or GUCs exist yet.** Proposed identifiers below are
-design names, not declarations present in PostgreSQL.
+Last updated: 2026-10-19. **Phase 1 adds optional native HashJoin counters.**
+Lookup/Expand execution and planner paths remain future work; identifiers in
+those design sections are proposals.
 
 ## Reproducible base and audit scope
 
@@ -361,97 +361,77 @@ compete as ordinary results. New costs belong in `costsize.c`/`cost.h`.
 This is an architectural decision to review in its own phase, not a promise
 that adding two node tags alone implements the paper optimizer.
 
-## Proposed Phase 1: optional native HashJoin counters
+## Phase 1: optional native HashJoin counters
 
-**Recommendation for review; not implemented.** Add instrumentation to the
-existing HashJoin state machine. Keep its transitions, tuple flow, planner
-costs, and quals unchanged. Baseline instrumentation covers native join
-behavior; it does not enable Diamond join execution.
+`SET diamond_hashjoin_stats = on` enables counters for instrumented execution
+such as EXPLAIN ANALYZE. The default is off. This diagnostic does not change
+join planning, qualifiers, transitions, or match enumeration. No Lookup/Expand
+execution is implemented by this phase.
 
-Alternatives: backend DEBUG logs are easy but awkward to attribute/aggregate;
-adding universal `NodeInstrumentation` fields enlarges every operator and
-shared record; a node-specific counter block follows Hash/Memoize and
-keeps these measurements associated with HashJoin. Recommend the latter,
-reported through normal EXPLAIN property helpers in text/JSON/XML/YAML.
+`DiamondHashJoinInstrumentation` in `include/executor/instrument_node.h`
+contains three uint64 counters. `HashJoinState.hj_DiamondStats` owns an
+optional query-lifetime block; `hj_DiamondMatched` records equality success
+for the current probe. The disabled/uninstrumented path allocates no block.
+`ExecInitHashJoin()` uses `estate->es_instrument`, because `ExecInitNode()`
+installs `PlanState.instrument` only after the node initializer returns.
 
-Proposed opt-in GUC: `diamond_hashjoin_stats`, default off, `PGC_USERSET`,
-latched at executor initialization and collected only with row
-instrumentation (e.g. EXPLAIN ANALYZE). This is separate from a future
-`enable_diamond_join` plan-selection GUC. Recheck GUC naming/category
-against nearby diagnostic parameters before adding its declaration.
-
-Proposed pointer-free `DiamondHashJoinInstrumentation` belongs in
-`include/executor/instrument_node.h`; query-lifetime ownership and a
-pointer/collection flag belong in `HashJoinState` in `execnodes.h`.
-The public configuration variable/interface can live in `nodeHashjoin.c`
-and `include/executor/nodeHashjoin.h`, following surrounding exports.
-
-Initialization ordering matters: `ExecInitNode()` allocates
-`PlanState.instrument` **after** the node-specific initializer returns.
-If collection is selected inside `ExecInitHashJoin()`, consult
-`estate->es_instrument`; checking `hjstate->js.ps.instrument` there would
-incorrectly conclude that instrumentation is disabled. Later execution/DSM
-hooks can use the initialized node instrumentation pointer.
-
-| Metric | Exact proposed event/meaning |
+| EXPLAIN property | Exact event/meaning |
 | --- | --- |
-| Hash probes | Once when an outer row is admitted to its resident main/skew batch and transitions to `HJ_SCAN_BUCKET`; do not count a row merely written to a later batch file |
-| Successful probes | Once on the first true bucket-scan return for that admitted row, after hash equality recheck; independent of residual joinqual/otherqual |
-| Build matches | Once for every true `ExecScanHashBucket` / `ExecParallelScanHashBucket` result actually consumed by the state machine; counts probe/build pairs, not globally distinct build rows |
-| Joined tuples emitted | Reuse native finalized `NodeInstrumentation.ntuples`/loops at the HashJoin; native count includes NULL-extended rows for outer joins |
-| Intermediate cardinality | Emitted rows of a non-root join over its observed executions, using native instrumentation; not bytes or peak resident memory |
+| Diamond Hash Probes | Row admitted to its resident main/skew batch and entering HJ_SCAN_BUCKET; a row written to a later batch is not yet counted |
+| Diamond Successful Probes | First true bucket-scan return for that admitted row, after equality recheck and before residual qualifiers |
+| Diamond Build Matches | Every true bucket-scan return actually consumed; probe/build pairs, including duplicates, not distinct build rows |
+| Diamond Tuples Emitted | Native finalized NodeInstrumentation.ntuples; cumulative output including outer-join NULL extension |
 
-Optionally add a separately named joinqual-pass pair counter to explain
-residual rejection; do not silently redefine equality success as output
-success. `hj_MatchedOuter` records residual join-match status, so it is
-not a substitute for the successful-equality-probe flag. A per-probe flag
-must reset at admission and rescan, not after every output tuple.
+Counters describe observed work. LIMIT, empty-input shortcuts, inner_unique,
+semi/anti behavior and right-semi skips can avoid potential matches. Collection
+never forces extra scans. Strict NULL keys discarded before admission do not
+probe. `hj_MatchedOuter` cannot replace the separate equality-success flag:
+residual qualifiers may reject every equality match. Rescan clears transient
+success state but retains totals. A child join's emitted rows give observed
+intermediate cardinality, not bytes or peak resident memory.
 
-Counters measure **observed work**: LIMIT/early shutdown, inner_unique,
-semi/anti early exits, empty-build/empty-outer shortcuts, and right-semi
-skips may avoid enumerating possible matches. Never force additional
-scans to make the counters exhaustive. A strict-NULL key discarded before
-admission is not a hash probe. Empty/skipped nodes must not display
-invented full-scan counts. Define sum-over-loops integer totals separately
-from native EXPLAIN's average rows per loop.
+The two hooks are inside `ExecHashJoinImpl()`; `nodeHash.c` is unchanged.
+Both serial and shared-hash scanners return through them. Projection/output
+counts use existing instrumentation rather than extra projection hooks.
 
-Minimum serial counter hooks can remain in `nodeHashjoin.c`: both scanners
-already return to `HJ_SCAN_BUCKET`. Editing `nodeHash.c` is unnecessary
-unless the design adds chain-visit/collision metrics (not required now).
+### Parallel lifetime
 
-Parallel collection must handle both shared Parallel Hash and private
-hash joins under Gather. Follow `MemoizeInstrumentation`/`SharedMemoizeInfo`
-and `ExecHashRetrieveInstrumentation()` for pointer-free worker records and
-leader-side copies before DSM destruction. Add a separately keyed stats
-allocation: HashJoin's existing plan_node_id TOC key is already used for
-`ParallelHashJoinState`. `instrument_node.h` documents the offset-key
-pattern; audit collisions before choosing a key. Update the HashJoin cases
-in the estimate/DSM/reinitialize/worker/retrieve walkers in `execParallel.c`
-so stats are not conditional solely on `plan->parallel_aware`. Preserve
-the existing guards for shared hash-table coordination itself.
+`SharedDiamondHashJoinInfo` provides one pointer-free counter record per
+worker. `ExecHashJoinEstimate()` / `ExecHashJoinInitializeDSM()` are called for
+both parallel-aware and private worker hashes; native shared-table setup
+remains guarded inside them. The existing secondary instrumentation key
+`plan_node_id + PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET` is safe here because a
+plan_node_id identifies exactly one node type.
 
-`ExecShutdownHashJoin()` must publish worker stats before cleanup;
-`ExecReScanHashJoin()` clears only transient probe flags and preserves
-cumulative totals. Worker relaunch/reinitialization must neither lose nor
-double-count prior totals. Sum additive counters across leader/workers;
-existing `HashInstrumentation` memory/bucket statistics use maxima and
-cannot simply be reused as an additive probe-counter container.
+`ExecHashJoinInitializeWorker()` attaches to the leader-selected collection
+block. That presence also controls worker collection if the GUC changed after
+leader initialization. Each worker owns its own slot: no atomic updates or
+shared counters are needed in the probe loop.
 
-Native row instrumentation has its own worker merge path. Reusing its
-final emitted-row total must not add worker row counts a second time when
-the helper aggregates the separate Diamond probe/match records.
+`ExecShutdownHashJoin()` adds local deltas to that worker's slot and clears
+its local block, making repeated publication idempotent. Shared records are
+not reset on Gather relaunch: fresh worker instances add to the existing
+slot. This preserves work from earlier launches.
 
-Presentation belongs on the HashJoin branch of `ExplainNode()` (a proposed
-`show_diamond_hashjoin_info()` helper); existing `show_hash_info()` stays
-on the Hash build child. Use `ExplainPropertyUInteger()` and group helpers,
-guarded by actual collection and ANALYZE. Off means no new output and no
-counter allocation; no claim of literally zero branch overhead.
+After workers finish, `ExecHashJoinRetrieveInstrumentation()` sums worker
+records into the leader's query-owned totals before DSM destruction, then
+clears the shared pointer to avoid stale access or repeated merging. This is
+smaller than retaining copies of all worker records. Native emitted rows
+already have their own worker merge; they are not added again here.
 
-Additional files: `utils/misc/guc_parameters.dat` (source, not generated
-`utils/guc_tables.inc.c`), `postgresql.conf.sample`, the relevant SGML
-configuration documentation, regression SQL/expected output/schedule, and
-this documentation. Phase 1 does not need `HashPath`, `HashJoin` Plan,
-costing, or join-search changes.
+### Presentation and configuration
 
-Acceptance and counter oracle are in TESTING.md. The native build/runtime
-baseline now passes; review this proposal before Phase 1 implementation.
+`show_diamond_hashjoin_info()` in `commands/explain.c` prints properties on
+the HashJoin node through normal text/JSON/XML/YAML helpers. It requires
+ANALYZE and a collection block; ordinary EXPLAIN and stats-off output retain
+native presentation. Counts are totals, whereas native Actual Rows is an
+average per loop. Build-child `show_hash_info()` remains unchanged.
+
+The GUC definition is source data in `utils/misc/guc_parameters.dat`, with
+its variable declared in `nodeHashjoin.h` and defined in `nodeHashjoin.c`.
+It is PGC_USERSET, DEVELOPER_OPTIONS, GUC_NOT_IN_SAMPLE, following native
+developer diagnostics. `doc/src/sgml/config.sgml` documents the semantics;
+no sample configuration or generated GUC file is edited.
+
+Regression coverage and exact commands/results are in TESTING.md. No Path,
+Plan, costing, hash storage, or join-search changes are needed for Phase 1.

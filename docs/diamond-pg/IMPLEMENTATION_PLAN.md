@@ -9,7 +9,7 @@ map and design explanation; EXECPLAN.md is the session continuation guide.
 | Phase | Status | Deliverable / acceptance gate |
 | --- | --- | --- |
 | 0: repository/paper mapping | Complete; system-package build, 239 regressions and runtime fixtures passed | Native planner/executor traces, paper mapping, invariants, tests, next-phase proposal; no functional changes |
-| 1: native instrumentation | Proposed, not started; user review pending | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
+| 1: native instrumentation | Complete; build, all 240 regressions and two-worker runtime checks passed | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
 | 2: match representation | Not started | Lookup immediately followed by Expand matches native results with duplicates, NULLs, filters, projections, rescans |
 | 3: first-class operations | Not started | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
 | 4: acyclic plans | Not started | Eligible alpha-acyclic inner-equijoin regions; legal paper-derived scheduling; native alternatives retained |
@@ -35,57 +35,45 @@ fixture/native hash-vs-non-hash result checks. See TESTING.md.
 - Existing untracked paper preserved; no tracked PostgreSQL file changed.
 - Runtime EXPLAIN confirms the documented two-/three-table behavior, including
   an 8-row intermediate and 4-row final result; actual input orientation is
-  recorded in ARCHITECTURE.md. Phase 1 instrumentation remains unimplemented.
+  recorded in ARCHITECTURE.md. These are the original native baseline results.
 
-## Phase 1 work packages (proposal only)
+## Phase 1: completed native instrumentation
 
-1. Resolve build prerequisites and establish native regression baseline.
-2. Agree on ARCHITECTURE.md's event definitions and off-by-default GUC.
-3. Add the serial node-specific instrumentation block and hooks; verify
-   hand-calculated counts, JSON/text rendering, off behavior, and rescans.
-4. Add parallel worker lifecycle/aggregation using separate DSM stats keys;
-   verify both shared and parallel-oblivious hash joins and worker relaunch.
-5. Run full native regression schedule, differential SQL, and update ledger.
+The user authorized this milestone after committing Phase 0 as `7756e8e52e`.
+`diamond_hashjoin_stats` is off by default and affects instrumentation only.
+ARCHITECTURE.md defines the counter events and lifetime contract.
 
-These can be separate reviewable commits inside Phase 1; a serial-only
-commit must explicitly report missing parallel measurements and must not
-claim Phase 1's complete instrumentation support.
+Changed production files:
 
-Planned production files:
+- `src/include/executor/instrument_node.h`: pointer-free counter/worker records.
+- `src/include/nodes/execnodes.h`: optional HashJoinState counters and probe flag.
+- `src/backend/executor/nodeHashjoin.c`: initialization, two counter hooks,
+  rescan, shutdown publication, DSM estimate/init/worker support and retrieval.
+- `src/include/executor/nodeHashjoin.h`: GUC/retrieval declarations.
+- `src/backend/executor/execParallel.c`: private/shared hash instrumentation
+  setup and retrieval, preserving native shared-table coordination guards.
+- `src/backend/commands/explain.c`: HashJoin properties, using native total
+  emitted-row statistics without a second worker merge.
+- `src/backend/utils/misc/{guc_parameters.dat,guc_tables.c}` and
+  `doc/src/sgml/config.sgml`: diagnostic declaration and documentation.
 
-- `src/include/executor/instrument_node.h`: proposed pointer-free
-  `DiamondHashJoinInstrumentation` and per-worker container.
-- `src/include/nodes/execnodes.h`: HashJoinState counter ownership,
-  transient success state, and shared/local statistics references.
-- `src/backend/executor/nodeHashjoin.c`: `ExecInitHashJoin`,
-  `ExecHashJoinImpl`, `ExecReScanHashJoin`, `ExecShutdownHashJoin`,
-  parallel stats estimate/init/reinit/worker/retrieval helpers.
-- `src/include/executor/nodeHashjoin.h`: exported diagnostic variable and
-  any new lifecycle helper declarations.
-- `src/backend/executor/execParallel.c`: integrate stats lifecycle for all
-  worker-executed HashJoins; keep shared-table coordination guards intact.
-- `src/backend/commands/explain.c`: HashJoin node-specific property output
-  and leader/worker summation; preserve existing Hash build statistics.
-- `src/backend/utils/misc/guc_parameters.dat`, `postgresql.conf.sample`,
-  `doc/src/sgml/config.sgml`: diagnostic control and semantics.
-- `src/test/regress/sql/diamond_hashjoin.sql`,
-  `src/test/regress/expected/diamond_hashjoin.out`,
-  `src/test/regress/parallel_schedule`: proposed self-contained tests.
+Tests: `src/test/regress/sql/diamond_hashjoin.sql`, its expected output, and
+`parallel_schedule`. All 240 core tests pass. Manual private/shared HashJoin
+plans each launched two workers with leader participation disabled; total
+probes/successes/matches/emissions were 20,000 each. Regression coverage
+includes three Gather launches (60,000 probes/matches), batching, serial
+rescans, changed hash-key parameters, NULLs/duplicates, qualifiers/projection,
+LIMIT, native join types, unchanged plans, instrumented multiset comparison,
+and all four EXPLAIN formats. Build is assertion/debug enabled and pgindent
+checks pass. Exact commands/evidence are in TESTING.md.
 
-No Phase 1 changes to `nodeHash.c`, HashPath, HashJoin Plan, or costing are
-required for the proposed three new probe/match counters. Reuse native
-row instrumentation for emitted/intermediate cardinality. Additive worker
-counts must not use the maxima used by Hash build memory statistics.
+No changes to `nodeHash.c`, hash storage, HashPath/HashJoin Plan, costing or
+join search were required. Reinitialization retains additive worker records;
+retrieval folds totals into query-owned memory rather than copying DSM.
+Developer settings use GUC_NOT_IN_SAMPLE, so no sample configuration changes.
+No speedup claim, sanitizer run, or Lookup/Expand execution is implied.
 
-Acceptance: off preserves output/semantics; on preserves result multisets
-and plan choices; counters obey the documented event definitions; duplicates
-do not collapse; collision checks remain; no double counting across batch
-deferral, rescans, or workers; LIMIT reports observed work; ordinary
-EXPLAIN without ANALYZE does not fabricate measurements. Native and new
-regression tests pass.
-
-Suggested first functional commit after authorization:
-`diamond-pg: add baseline hash join instrumentation`.
+Suggested commit: `diamond-pg: add baseline hash join instrumentation`.
 
 ## Phase 2: match representation
 
@@ -207,15 +195,13 @@ paper's absolute-number reproduction on different hardware/configuration.
 
 ## Decisions still requiring design review
 
-1. Phase 1 exact GUC naming/category and separate stats DSM key allocation;
-   total/loop presentation and worker relaunch accounting.
-2. Cursor versus eager match representation and independence from mutable
+1. Cursor versus eager match representation and independence from mutable
    HashJoinState expression slots; evaluated key ownership.
-3. Internal payload/slot protocol, nested Lookup build storage, and safe
+2. Internal payload/slot protocol, nested Lookup build storage, and safe
    treatment of Material/Sort/Gather/spill and parameterized execution.
-4. L&E optimizer state identity and path-pruning equivalence classes;
+3. L&E optimizer state identity and path-pruning equivalence classes;
    initial search scope and planning-time bound.
-5. Runtime batching/fallback strategy: estimates cannot guarantee no spill,
+4. Runtime batching/fallback strategy: estimates cannot guarantee no spill,
    and restarting after emitting rows would duplicate results.
-6. Expand3 match counts/secondary indexes and duplicate semantics.
-7. Memory/risk calibration and benchmark scale on available hardware.
+5. Expand3 match counts/secondary indexes and duplicate semantics.
+6. Memory/risk calibration and benchmark scale on available hardware.

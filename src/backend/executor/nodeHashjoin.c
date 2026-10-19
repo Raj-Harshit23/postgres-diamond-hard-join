@@ -175,6 +175,9 @@
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
+/* Diamond-PG: diagnostic GUC only; never controls join planning/execution. */
+bool		diamond_hashjoin_stats = false;
+
 
 /*
  * States of the ExecHashJoin state machine
@@ -528,6 +531,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					continue;
 				}
 
+				/*
+				 * Diamond-PG: count a probe only after batch deferral.  The
+				 * equality-success flag must survive projected output rows;
+				 * hj_MatchedOuter instead depends on residual joinquals.
+				 */
+				if (node->hj_DiamondStats)
+				{
+					node->hj_DiamondStats->probes++;
+					node->hj_DiamondMatched = false;
+				}
+
 				/* OK, let's scan the bucket for matches */
 				node->hj_JoinState = HJ_SCAN_BUCKET;
 
@@ -554,6 +568,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						/* out of matches; check for possible outer-join fill */
 						node->hj_JoinState = HJ_FILL_OUTER_TUPLE;
 						continue;
+					}
+				}
+
+				/*
+				 * Diamond-PG: both scanners have rechecked hash equality.
+				 * Count only work actually performed, before residual quals
+				 * or semi/anti shortcuts; never scan extra matches for stats.
+				 */
+				if (node->hj_DiamondStats)
+				{
+					node->hj_DiamondStats->build_matches++;
+					if (!node->hj_DiamondMatched)
+					{
+						node->hj_DiamondStats->successful_probes++;
+						node->hj_DiamondMatched = true;
 					}
 				}
 
@@ -849,6 +878,15 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate = makeNode(HashJoinState);
 	hjstate->js.ps.plan = (Plan *) node;
 	hjstate->js.ps.state = estate;
+
+	/*
+	 * Diamond-PG: latch collection for this execution in query-owned memory.
+	 * ExecInitNode has not installed ps.instrument yet, so use es_instrument.
+	 * The disabled path allocates no counters and retains native tuple flow.
+	 */
+	if (diamond_hashjoin_stats && estate->es_instrument)
+		hjstate->hj_DiamondStats =
+			palloc0_object(DiamondHashJoinInstrumentation);
 
 	/*
 	 * See ExecHashJoinInitializeDSM() and ExecHashJoinInitializeWorker()
@@ -1747,6 +1785,8 @@ ExecReScanHashJoin(HashJoinState *node)
 	}
 
 	/* Always reset intra-tuple state */
+	/* Diamond-PG: keep cumulative counters, but forget this probe's success. */
+	node->hj_DiamondMatched = false;
 	node->hj_CurHashValue = 0;
 	node->hj_CurBucketNo = 0;
 	node->hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;
@@ -1766,6 +1806,25 @@ ExecReScanHashJoin(HashJoinState *node)
 void
 ExecShutdownHashJoin(HashJoinState *node)
 {
+	/*
+	 * Diamond-PG: each worker owns its slot, so no atomics are needed.  Add
+	 * deltas rather than overwrite: a Gather can relaunch fresh workers into
+	 * the same DSM.  Clearing local counters makes repeated shutdown safe.
+	 */
+	if (node->hj_DiamondShared && IsParallelWorker())
+	{
+		DiamondHashJoinInstrumentation *stats;
+
+		Assert(node->hj_DiamondStats != NULL);
+		Assert(ParallelWorkerNumber < node->hj_DiamondShared->num_workers);
+		stats = &node->hj_DiamondShared->stats[ParallelWorkerNumber];
+		stats->probes += node->hj_DiamondStats->probes;
+		stats->successful_probes += node->hj_DiamondStats->successful_probes;
+		stats->build_matches += node->hj_DiamondStats->build_matches;
+		memset(node->hj_DiamondStats, 0,
+			   sizeof(DiamondHashJoinInstrumentation));
+	}
+
 	if (node->hj_HashTable)
 	{
 		/*
@@ -1842,6 +1901,25 @@ ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)
 void
 ExecHashJoinEstimate(HashJoinState *state, ParallelContext *pcxt)
 {
+	/*
+	 * Diamond-PG: private hashes under Gather need worker stats too.  Reuse
+	 * the secondary instrumentation key: plan_node_id identifies one node
+	 * type, so it cannot collide with scan instrumentation for another node.
+	 */
+	if (state->hj_DiamondStats && pcxt->nworkers > 0)
+	{
+		Size		size;
+
+		size = add_size(offsetof(SharedDiamondHashJoinInfo, stats),
+						mul_size(pcxt->nworkers,
+								 sizeof(DiamondHashJoinInstrumentation)));
+		shm_toc_estimate_chunk(&pcxt->estimator, size);
+		shm_toc_estimate_keys(&pcxt->estimator, 1);
+	}
+
+	if (!state->js.ps.plan->parallel_aware)
+		return;
+
 	shm_toc_estimate_chunk(&pcxt->estimator, sizeof(ParallelHashJoinState));
 	shm_toc_estimate_keys(&pcxt->estimator, 1);
 }
@@ -1852,6 +1930,25 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	int			plan_node_id = state->js.ps.plan->plan_node_id;
 	HashState  *hashNode;
 	ParallelHashJoinState *pstate;
+
+	/* Diamond-PG: zero all worker totals once, preserving them on relaunch. */
+	if (state->hj_DiamondStats && pcxt->nworkers > 0)
+	{
+		Size		size;
+
+		size = add_size(offsetof(SharedDiamondHashJoinInfo, stats),
+						mul_size(pcxt->nworkers,
+								 sizeof(DiamondHashJoinInstrumentation)));
+		state->hj_DiamondShared = shm_toc_allocate(pcxt->toc, size);
+		memset(state->hj_DiamondShared, 0, size);
+		state->hj_DiamondShared->num_workers = pcxt->nworkers;
+		shm_toc_insert(pcxt->toc,
+					   plan_node_id + PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+					   state->hj_DiamondShared);
+	}
+
+	if (!state->js.ps.plan->parallel_aware)
+		return;
 
 	/*
 	 * Disable shared hash table mode if we failed to create a real DSM
@@ -1963,8 +2060,27 @@ ExecHashJoinInitializeWorker(HashJoinState *state,
 {
 	HashState  *hashNode;
 	int			plan_node_id = state->js.ps.plan->plan_node_id;
-	ParallelHashJoinState *pstate =
-		shm_toc_lookup(pwcxt->toc, plan_node_id, false);
+	ParallelHashJoinState *pstate;
+
+	/*
+	 * Diamond-PG: the leader's latched choice controls worker collection,
+	 * even if a function changed the GUC before the workers were launched.
+	 */
+	state->hj_DiamondShared = shm_toc_lookup(pwcxt->toc,
+											 plan_node_id + PARALLEL_KEY_SCAN_INSTRUMENT_OFFSET,
+											 true);
+	if (state->hj_DiamondShared && !state->hj_DiamondStats)
+		state->hj_DiamondStats = palloc0_object(DiamondHashJoinInstrumentation);
+	else if (!state->hj_DiamondShared && state->hj_DiamondStats)
+	{
+		pfree(state->hj_DiamondStats);
+		state->hj_DiamondStats = NULL;
+	}
+
+	if (!state->js.ps.plan->parallel_aware)
+		return;
+
+	pstate = shm_toc_lookup(pwcxt->toc, plan_node_id, false);
 
 	/* Attach to the space for shared temporary files. */
 	SharedFileSetAttach(&pstate->fileset, pwcxt->seg);
@@ -1974,4 +2090,29 @@ ExecHashJoinInitializeWorker(HashJoinState *state,
 	hashNode->parallel_state = pstate;
 
 	ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
+}
+
+/*
+ * Diamond-PG: fold completed workers' probe/match totals into this leader
+ * HashJoinState before its DSM is destroyed.  ExecParallelCleanup calls this
+ * after all worker launches have finished.  Detach the shared pointer so a
+ * repeated retrieval cannot double-count or access freed DSM.  Native emitted
+ * rows have their own merge path and must not be added here.
+ */
+void
+ExecHashJoinRetrieveInstrumentation(HashJoinState *state)
+{
+	SharedDiamondHashJoinInfo *shared = state->hj_DiamondShared;
+
+	if (shared == NULL)
+		return;
+
+	Assert(state->hj_DiamondStats != NULL);
+	for (int i = 0; i < shared->num_workers; i++)
+	{
+		state->hj_DiamondStats->probes += shared->stats[i].probes;
+		state->hj_DiamondStats->successful_probes += shared->stats[i].successful_probes;
+		state->hj_DiamondStats->build_matches += shared->stats[i].build_matches;
+	}
+	state->hj_DiamondShared = NULL;
 }

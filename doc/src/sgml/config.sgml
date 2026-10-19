@@ -12989,6 +12989,37 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-hashjoin-stats" xreflabel="diamond_hashjoin_stats">
+      <term><varname>diamond_hashjoin_stats</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>diamond_hashjoin_stats</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: collect native hash join probe and match counts for
+        <command>EXPLAIN ANALYZE</command>. The default is <literal>off</literal>.
+        Collection is selected when the executor node is initialized; ordinary
+        execution without row instrumentation does not collect these counters.
+        This setting does not change join planning or query results.
+       </para>
+       <para>
+        <literal>Diamond Hash Probes</literal> counts probe tuples admitted to
+        their resident hash batch, excluding batch deferrals and strict-NULL
+        keys discarded before probing. <literal>Diamond Successful Probes</literal>
+        counts probes finding at least one hash-equality match, before residual
+        qualifications. <literal>Diamond Build Matches</literal> counts consumed
+        probe/build pairs, including duplicates, rather than distinct build rows.
+        <literal>Diamond Tuples Emitted</literal> reuses native row instrumentation
+        and includes outer-join null-extended rows. These are cumulative totals
+        across loops and workers. Early termination and semi/anti join shortcuts
+        measure only work actually performed; collecting statistics never scans
+        additional matches. Emitted rows of a child join give its observed
+        intermediate cardinality, not intermediate bytes or peak memory.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-ignore-system-indexes" xreflabel="ignore_system_indexes">
       <term><varname>ignore_system_indexes</varname> (<type>boolean</type>)
       <indexterm>

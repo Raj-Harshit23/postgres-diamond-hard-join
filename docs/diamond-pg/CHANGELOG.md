@@ -1,5 +1,64 @@
 # Diamond-PG changelog
 
+## 2026-10-19 - Phase 1: optional native HashJoin instrumentation
+
+Based on the user's Phase 0 commit `7756e8e52e`; authorized to proceed with
+Phase 1 only. Added no planner paths or Lookup/Expand execution.
+
+### Files and behavior
+
+| File | Change |
+| --- | --- |
+| `src/backend/executor/nodeHashjoin.c` | Optional query-owned counters in ExecInitHashJoin; admission/first-success/match hooks in ExecHashJoinImpl; transient reset in ExecReScanHashJoin; additive worker publication in ExecShutdownHashJoin; existing DSM estimate/init/worker functions support private hashes too; new ExecHashJoinRetrieveInstrumentation folds totals before cleanup |
+| `src/include/executor/instrument_node.h` | DiamondHashJoinInstrumentation and SharedDiamondHashJoinInfo; reuse the existing secondary instrumentation TOC key space |
+| `src/include/nodes/execnodes.h` | HashJoinState's hj_DiamondStats, hj_DiamondShared and hj_DiamondMatched |
+| `src/include/executor/nodeHashjoin.h` | GUC and retrieval declarations |
+| `src/backend/executor/execParallel.c` | Invoke statistics setup/retrieval for both private/shared worker hashes; preserve native shared-table guards |
+| `src/backend/commands/explain.c` | show_diamond_hashjoin_info prints totals through native format helpers; emitted rows reuse native instrumentation |
+| `src/backend/utils/misc/guc_parameters.dat` | Off-by-default PGC_USERSET diamond_hashjoin_stats diagnostic; generator input only |
+| `src/backend/utils/misc/guc_tables.c` | Include the variable's declaration |
+| `doc/src/sgml/config.sgml` | Exact counter/loop/worker/early-exit semantics |
+| `src/test/regress/sql/diamond_hashjoin.sql` | Self-contained counter, differential, lifecycle and format tests |
+| `src/test/regress/expected/diamond_hashjoin.out` | Reviewed expected results; boolean oracles all true |
+| `src/test/regress/parallel_schedule` | Include the new test in the full schedule |
+| `AGENTS.md` | Record Phase 1 authorization and retain the one-phase boundary |
+| `docs/diamond-pg/ARCHITECTURE.md` | Replace the proposal with implemented events, fields and lifetime flow |
+| `docs/diamond-pg/IMPLEMENTATION_PLAN.md` | Mark Phase 1 complete and retain future design decisions |
+| `docs/diamond-pg/EXECPLAN.md` | Current commit/state and Phase 2 handoff |
+| `docs/diamond-pg/TESTING.md` | Usage, exact regression commands and evidence |
+| `docs/diamond-pg/CHANGELOG.md` | This ledger entry |
+
+A probe is counted after batch deferral, equality success before residual
+quals, and every consumed matching pair once. Normal state transitions,
+qualifiers and projection are unchanged. Stats-off/uninstrumented execution
+allocates no counters. Gather worker slots add deltas across relaunches;
+leader retrieval clears its DSM pointer after merging to avoid stale access
+or duplicate merging. Native emitted-row merging remains independent.
+
+### Validation
+
+- Assertion/debug system-package build passed without reported warnings.
+- Reviewed hand-calculated regression oracles before accepting expected output;
+  the on-path EXCEPT ALL capture uses EXPLAIN ANALYZE CTAS to execute hooks.
+- **All 240 core regression tests passed**, including diamond_hashjoin and
+  the existing join/hash/subselect/partition/EXPLAIN tests.
+- New tests cover off/plain output and unchanged plans, NULLs, zero/one/many
+  matches, duplicates on both sides, projection/residual rejection, multi-key
+  equality, LIMIT, native outer/semi/anti behavior, batch deferral, rescans,
+  changed hash-key parameters, worker totals/relaunch and all EXPLAIN formats.
+- Runtime private/shared hash plans each launched two workers, leader
+  participation off: exactly 20,000 probes/successes/matches/emitted rows.
+  Regression relaunch case reports 60,000 probes/matches across three launches.
+- pgindent check passed on touched C/headers with the two added typedefs.
+  Final diff/whitespace review passed. Private server stopped.
+
+Commands and ignored evidence paths are in TESTING.md. No sanitizer,
+check-world, benchmark or performance result is claimed. This is baseline
+instrumentation, not a Lookup/Expand implementation. The user requested the
+Phase 1 checkpoint commit after review. No push or remote operation is authorized.
+
+Suggested commit: `diamond-pg: add baseline hash join instrumentation`.
+
 ## 2026-10-19 - Phase 0: mapping and baseline validation
 
 ### Changes

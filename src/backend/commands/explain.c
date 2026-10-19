@@ -127,6 +127,7 @@ static void show_sort_info(SortState *sortstate, ExplainState *es);
 static void show_incremental_sort_info(IncrementalSortState *incrsortstate,
 									   ExplainState *es);
 static void show_hash_info(HashState *hashstate, ExplainState *es);
+static void show_diamond_hashjoin_info(HashJoinState *hjstate, ExplainState *es);
 static void show_material_info(MaterialState *mstate, ExplainState *es);
 static void show_windowagg_info(WindowAggState *winstate, ExplainState *es);
 static void show_ctescan_info(CteScanState *ctescanstate, ExplainState *es);
@@ -2204,6 +2205,7 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 2,
 										   planstate, es);
+			show_diamond_hashjoin_info((HashJoinState *) planstate, es);
 			break;
 		case T_Agg:
 			show_agg_keys(castNode(AggState, planstate), ancestors, es);
@@ -3386,6 +3388,30 @@ show_incremental_sort_info(IncrementalSortState *incrsortstate,
 				ExplainCloseWorker(n, es);
 		}
 	}
+}
+
+/*
+ * Diamond-PG: show native HashJoin work collected for this execution.  Worker
+ * probe/match totals were folded into query-owned state before DSM cleanup.
+ * Use native finalized row instrumentation for total emitted/intermediate
+ * rows (already merged across workers), rather than count projections twice.
+ * These are totals over all observed loops, not EXPLAIN's rows-per-loop mean.
+ */
+static void
+show_diamond_hashjoin_info(HashJoinState *hjstate, ExplainState *es)
+{
+	DiamondHashJoinInstrumentation *stats = hjstate->hj_DiamondStats;
+
+	if (!es->analyze || stats == NULL)
+		return;
+
+	ExplainPropertyUInteger("Diamond Hash Probes", NULL, stats->probes, es);
+	ExplainPropertyUInteger("Diamond Successful Probes", NULL,
+							stats->successful_probes, es);
+	ExplainPropertyUInteger("Diamond Build Matches", NULL,
+							stats->build_matches, es);
+	ExplainPropertyFloat("Diamond Tuples Emitted", NULL,
+						 hjstate->js.ps.instrument->ntuples, 0, es);
 }
 
 /*

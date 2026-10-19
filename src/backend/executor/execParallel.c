@@ -315,9 +315,8 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 											 e->pcxt);
 			break;
 		case T_HashJoinState:
-			if (planstate->plan->parallel_aware)
-				ExecHashJoinEstimate((HashJoinState *) planstate,
-									 e->pcxt);
+			/* Diamond-PG: instrument private worker hashes as well. */
+			ExecHashJoinEstimate((HashJoinState *) planstate, e->pcxt);
 			break;
 		case T_HashState:
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
@@ -567,9 +566,8 @@ ExecParallelInitializeDSM(PlanState *planstate,
 											d->pcxt);
 			break;
 		case T_HashJoinState:
-			if (planstate->plan->parallel_aware)
-				ExecHashJoinInitializeDSM((HashJoinState *) planstate,
-										  d->pcxt);
+			/* Diamond-PG: hash-table coordination remains conditional inside. */
+			ExecHashJoinInitializeDSM((HashJoinState *) planstate, d->pcxt);
 			break;
 		case T_HashState:
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
@@ -1159,6 +1157,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_HashState:
 			ExecHashRetrieveInstrumentation((HashState *) planstate);
 			break;
+		case T_HashJoinState:
+			ExecHashJoinRetrieveInstrumentation((HashJoinState *) planstate);
+			break;
 		case T_AggState:
 			ExecAggRetrieveInstrumentation((AggState *) planstate);
 			break;
@@ -1472,9 +1473,8 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 											   pwcxt);
 			break;
 		case T_HashJoinState:
-			if (planstate->plan->parallel_aware)
-				ExecHashJoinInitializeWorker((HashJoinState *) planstate,
-											 pwcxt);
+			/* Diamond-PG: worker counters do not require a shared hash table. */
+			ExecHashJoinInitializeWorker((HashJoinState *) planstate, pwcxt);
 			break;
 		case T_HashState:
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */

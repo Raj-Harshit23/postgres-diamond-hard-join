@@ -72,9 +72,19 @@ Inspect `src/test/regress/regression.diffs`, `results/`, and `log/` under
 block before SQL execution, not a regression assertion failure. Run the same
 command from your normal terminal if sandbox execution is denied.
 
-Future self-contained Diamond tests may use native
-`make -C "$diamond_build/src/test/regress" check-tests TESTS=diamond_hashjoin`
-after the corresponding SQL/expected files exist. No Diamond test exists yet.
+To run the self-contained Phase 1 test alone:
+
+```sh
+make -C "$diamond_build/src/test/regress" check-tests \
+  TESTS=diamond_hashjoin > "$diamond_build/diamond_hashjoin.log" 2>&1
+```
+
+The full schedule includes this test automatically. It checks exact counters,
+batch deferral, NULLs/duplicates, residual qualifiers, multi-key joins, early
+termination, native outer/semi/anti joins, reusable/parameterized rescans,
+worker totals/relaunches, plan invariance, instrumented off/on EXCEPT ALL
+comparisons and text/JSON/XML/YAML output. The on-path result capture uses
+EXPLAIN ANALYZE CREATE TABLE AS so the counter hooks actually execute.
 
 ## 4. Manual HashJoin traces
 
@@ -151,47 +161,66 @@ Exit psql with `\q`, then stop the server:
 "$diamond_install/bin/pg_ctl" -D "$diamond_work/data" -w stop -m fast
 ```
 
-## 5. Later functional validation
+## 5. Use Phase 1 instrumentation
 
-Compare the same query/data/snapshot with Diamond off/on using **EXCEPT ALL
-in both directions**, preserving duplicates. Phase 1 compares stats off/on.
-Cover zero/one/many matches, duplicate keys on both inputs, strict NULLs,
-multiple keys/columns, residual predicates/projection, empty inputs,
-rescans/changed parameters, batching/skew, LIMIT, cancellation and cleanup.
-Unsupported query classes must retain native semantics.
+In a server built/installed from the current source, enable collection before
+executing the query to measure:
 
-Parallel tests need ordinary tables: temporary tables cannot supply parallel
-table scans. Check both shared Parallel Hash and private hashes under Gather,
-leader participation, actual launched workers and rescan/relaunch accounting.
-Use the existing `join_hash` tests for the baseline.
+```sql
+SET diamond_hashjoin_stats = on;
+EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) SELECT ...;
+RESET diamond_hashjoin_stats;
+```
+
+Replace `SELECT ...` with the concrete query, for example the fixtures above.
+Use `FORMAT JSON` for machine-readable measurements. HashJoin nodes report
+`Diamond Hash Probes`, `Diamond Successful Probes`, `Diamond Build Matches`,
+and `Diamond Tuples Emitted`. These are totals over loops and workers;
+`Actual Rows` remains PostgreSQL's per-loop mean. Plain EXPLAIN and default
+stats-off output omit these properties. Collection is latched per node at
+executor initialization; regular execution without row instrumentation does
+not allocate counters. See ARCHITECTURE.md for the precise event definitions.
+
+Parallel runtime checks need ordinary tables (temporary tables cannot supply
+parallel scans). Verify `Workers Launched` rather than assuming workers ran;
+our recorded checks launched two in both private/shared hash modes with
+leader participation disabled. No helper framework is needed to reproduce:
+use the test's batch_data fixture/settings in a private session and EXPLAIN
+ANALYZE its two count queries.
+
+## 6. Later functional validation
+
+For Lookup/Expand phases compare the same query/data/snapshot with Diamond
+off/on using EXCEPT ALL in both directions, preserving duplicates. Unsupported
+classes must retain native behavior. Add lifecycle/materialization cases as
+new ownership is introduced; do not claim instrumentation proves deferred
+execution is correct.
 
 For ownership bugs use a separate assertion/debug ASan build with
 `CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer'` and
-`LDFLAGS='-fsanitize=address'`. New nodes also need the round-trip checks in
-`src/backend/nodes/README`. No sanitizer run is claimed for Phase 0.
+`LDFLAGS='-fsanitize=address'`. New nodes need the round-trip checks in
+`src/backend/nodes/README`. No sanitizer run is claimed here.
 
 Benchmarks are Phase 8: paper microbenchmarks, JOB and TPC-H. Record commit,
 query/data seed/scale, hardware/configuration, warmups/repetitions, latency,
-planning time, intermediate rows, observed hash memory/batches/temp I/O and
-correctness. No benchmark runner/results exist yet. EXPLAIN row counts are
-averages per loop; width-times-rows is not measured peak memory.
+planning time, intermediate rows, hash memory/batches/temp I/O and correctness.
+No benchmark results or performance claim exist yet.
 
 ## Actual validation ledger
 
-Verified 2026-10-19 on the persistent system-package build:
+- Phase 0: system-package assertion/debug build, all 239 original core tests,
+  and two-/three-table native fixtures passed (2026-10-19).
+- Phase 1: assertion/debug build without reported compiler warnings; all
+  **240 core tests passed**, including diamond_hashjoin. pgindent passed on
+  touched C/headers using the in-tree pg_bsd_indent and the two new typedefs.
+- Manual runtime: private/shared hash each launched two workers; all four
+  total counters were 20,000. Regression worker relaunch case counted 60,000
+  probes/matches over three launches. Private server stopped after validation.
 
-- Configure and `make -j4`: PASS; assertions/debug/ICU/readline enabled;
-  no compiler warnings reported.
-- `make check`: **all 239 core tests passed**, including every test named above.
-- Installed server: PostgreSQL 20devel; `debug_assertions=on`.
-- Two-table, residual-filter and three-table fixtures: exact expected
-  multisets PASS; native hash/non-hash comparisons PASS.
-- EXPLAIN JSON: equality 3 rows, residual 2; three-table lower join 8 and
-  upper join 4. Actual lower orientation is f probes/h builds.
-- Private runtime server stopped after validation.
-
-Evidence under `diamond_build`: `configure.log`, `build-console.log`,
-`check.log`, `install.log`, `initdb.log`, `server.log`, `runtime.log`,
-and `{equality,residual,three_table}-plan.json`. The captured assertion SQL
-is `diamond_work/baseline.sql`. These are ignored generated output, not
-files to stage. No Diamond off/on, sanitizer or benchmark run is claimed.
+Phase 1 evidence under `diamond_build`: `phase1-build.log`, `phase1-check.log`,
+`phase1-install.log`, `phase1-runtime.log`, `phase1-server.log`, and
+`phase1-{private,shared}-plan.json`. Native driver details remain under
+`src/test/regress/{results,log}`. Phase 0's original configure/build/runtime
+logs and plans remain in the same ignored build tree. Never stage generated
+logs, clusters or build outputs. No sanitizer/check-world/benchmark pass is
+claimed. CHANGELOG.md records the changed files and implementation decisions.

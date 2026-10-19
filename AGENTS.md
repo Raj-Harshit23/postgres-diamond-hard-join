@@ -30,9 +30,9 @@ Use system-installed dependencies and standard configure/make/psql commands.
 Keep generated builds, clusters, and useful validation output in one ignored,
 persistent project directory. Do not use /tmp dependency/build workarounds.
 
-The current milestone is Phase 0, documentation and source mapping only.
-Do not begin functional Phase 1 work until the user authorizes proceeding
-after reviewing its architecture. Later, implement one major phase at a time.
+The user authorized Phase 1 after committing the Phase 0 baseline. Complete
+only native HashJoin instrumentation and its validation in this milestone.
+Do not advance to Phase 2 or another major phase without user direction.
 
 Before substantial work, read:
 
@@ -122,6 +122,11 @@ Work on a dedicated project branch, never directly on master/main.
 Do not push, force-push, merge, rebase, delete branches, or create a PR unless
 explicitly requested. Suggest commits for review; do not automatically commit.
 Do not combine unrelated phases.
+
+All new Diamond-PG commits must use the user's Git author and committer
+identity. Do not add Codex, ChatGPT, AI-assistant, or similar co-author
+trailers or attribution to commit messages. Preserve upstream authorship
+and existing history; do not rewrite commits without explicit instruction.
 
 Never commit build products, database clusters, generated benchmark datasets,
 temporary logs, or machine configuration. Preserve the user's untracked

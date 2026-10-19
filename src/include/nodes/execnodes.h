@@ -2236,6 +2236,11 @@ typedef struct HashJoinState
 	bool		hj_KeepNullTuples;
 	bool		hj_MatchedOuter;
 	bool		hj_OuterNotEmpty;
+
+	/* Diamond-PG: query-owned totals and worker DSM counters. */
+	DiamondHashJoinInstrumentation *hj_DiamondStats;
+	SharedDiamondHashJoinInfo *hj_DiamondShared;
+	bool		hj_DiamondMatched;	/* probe has an equality match? */
 } HashJoinState;
 
 

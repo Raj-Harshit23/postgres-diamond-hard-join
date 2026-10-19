@@ -1,0 +1,298 @@
+-- Diamond-PG Phase 1: native execution stays unchanged; counters measure
+-- admitted probes, equality-qualified pairs, and total emitted rows.
+begin;
+set local enable_mergejoin = off;
+set local enable_nestloop = off;
+set local max_parallel_workers_per_gather = 0;
+set local jit = off;
+create schema diamond_hashjoin_test;
+set local search_path = diamond_hashjoin_test, public;
+-- Return HashJoin nodes only, avoiding unstable timing/cost/buffer output.
+-- The SQL argument is a test query; run_analyze=false checks plain EXPLAIN.
+create function diamond_plan(query text, run_analyze boolean default true)
+returns setof jsonb language plpgsql as $$
+declare
+  plan jsonb;
+begin
+  execute 'explain (format json, costs off, timing off, analyze ' ||
+          run_analyze || ') ' || query into plan;
+  return query
+    with recursive nodes(node) as (
+      select plan->0->'Plan'
+      union all
+      select child from nodes,
+        lateral jsonb_array_elements(node->'Plans') child
+    )
+    select node from nodes where node->>'Node Type' = 'Hash Join';
+end;
+$$;
+create table probe(id int, k int, x int);
+create table build(id int, k int, v int);
+insert into probe values (1,1,10),(2,2,20),(3,3,30),(4,4,40),(5,null,50);
+insert into build values (11,1,5),(12,1,15),(13,2,25),(14,null,0);
+analyze probe, build;
+show diamond_hashjoin_stats;
+ diamond_hashjoin_stats 
+------------------------
+ off
+(1 row)
+
+select bool_and(not (p ? 'Diamond Hash Probes')) as disabled_output
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k') p;
+ disabled_output 
+-----------------
+ t
+(1 row)
+
+-- Capture the baseline multiset before enabling collection.
+create table expected_result as
+  select r.k as probe_key,s.k as build_key,r.x+1 as projected
+  from probe r join build s on r.k=s.k;
+create table expected_plan as
+  select p from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k', false) p;
+set local diamond_hashjoin_stats = on;
+select bool_and(not (p ? 'Diamond Hash Probes')) as plain_explain
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k', false) p;
+ plain_explain 
+---------------
+ t
+(1 row)
+
+select not exists (
+  (table expected_plan except all
+   select p from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k', false) p)
+  union all
+  (select p from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k', false) p
+   except all table expected_plan)
+) as unchanged_plan;
+ unchanged_plan 
+----------------
+ t
+(1 row)
+
+-- Account for either legal build/probe orientation.  NULL keys do not probe;
+-- two duplicate build keys produce three pairs, not two distinct keys.
+select
+  (p->>'Diamond Hash Probes')::int =
+    case when p#>>'{Plans,0,Alias}' = 'r' then 4 else 3 end as probes,
+  (p->>'Diamond Successful Probes')::int =
+    case when p#>>'{Plans,0,Alias}' = 'r' then 2 else 3 end as successes,
+  p->>'Diamond Build Matches' = '3' as matches,
+  p->>'Diamond Tuples Emitted' = '3' as emitted
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k') p;
+ probes | successes | matches | emitted 
+--------+-----------+---------+---------
+ t      | t         | t       | t
+(1 row)
+
+-- Equality success survives a residual predicate rejecting every pair.
+select p->>'Diamond Build Matches' = '3' as matches_before_filter,
+       (p->>'Diamond Successful Probes')::int > 0 as equality_success,
+       p->>'Diamond Tuples Emitted' = '0' as all_rejected
+from diamond_plan(
+  'select r.id,s.id from probe r join build s on r.k=s.k and r.x<s.v-100') p;
+ matches_before_filter | equality_success | all_rejected 
+-----------------------+------------------+--------------
+ t                     | t                | t
+(1 row)
+
+-- EXPLAIN ANALYZE executes CTAS with row instrumentation, so the on-path
+-- comparison exercises the actual counter hooks, not just the GUC setting.
+select p->>'Diamond Tuples Emitted' = '3' as instrumented_capture
+from diamond_plan('create table observed_result as
+  select r.k as probe_key,s.k as build_key,r.x+1 as projected
+  from probe r join build s on r.k=s.k') p;
+ instrumented_capture 
+----------------------
+ t
+(1 row)
+
+select not exists (
+  (table expected_result except all table observed_result)
+  union all
+  (table observed_result except all table expected_result)
+) as off_on_same_multiset;
+ off_on_same_multiset 
+----------------------
+ t
+(1 row)
+
+select p->>'Diamond Build Matches' = '1' as multiple_hash_keys,
+       p->>'Diamond Tuples Emitted' = '1' as one_match
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k and r.id=s.id-10') p;
+ multiple_hash_keys | one_match 
+--------------------+-----------
+ t                  | t
+(1 row)
+
+insert into probe values (6,1,12);
+analyze probe;
+select p->>'Diamond Build Matches' = '5' as duplicates_on_both_sides,
+       p->>'Diamond Tuples Emitted' = '5' as duplicate_outputs
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k') p;
+ duplicates_on_both_sides | duplicate_outputs 
+--------------------------+-------------------
+ t                        | t
+(1 row)
+
+delete from probe where id=6;
+analyze probe;
+select p->>'Diamond Build Matches' = '0' as no_matches,
+       p->>'Diamond Successful Probes' = '0' as no_successes
+from diamond_plan('select * from probe r join build s on r.k=s.k+100') p;
+ no_matches | no_successes 
+------------+--------------
+ t          | t
+(1 row)
+
+create table empty_build(k int);
+select p->>'Diamond Hash Probes' = '0' as empty_shortcut,
+       p->>'Diamond Tuples Emitted' = '0' as empty_output
+from diamond_plan('select * from probe r join empty_build s on r.k=s.k') p;
+ empty_shortcut | empty_output 
+----------------+--------------
+ t              | t
+(1 row)
+
+-- LIMIT counts observed work, not every possible match in the relation.
+select p->>'Diamond Tuples Emitted' = '1' as limited_output,
+       p->>'Diamond Build Matches' = '1' as limited_matches
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k limit 1') p;
+ limited_output | limited_matches 
+----------------+-----------------
+ t              | t
+(1 row)
+
+-- Native outer/semi/anti behavior is preserved; every actual join output,
+-- including NULL extension, is represented in the native emitted-row total.
+select bool_and((p->>'Diamond Tuples Emitted')::numeric =
+                (p->>'Actual Rows')::numeric * (p->>'Actual Loops')::numeric)
+       as native_join_types
+from (values
+  ('select r.id,s.id from probe r full join build s on r.k=s.k'),
+  ('select r.id from probe r where exists (select from build s where r.k=s.k)'),
+  ('select r.id from probe r where not exists (select from build s where r.k=s.k)')
+) q(sql), lateral diamond_plan(sql) p;
+ native_join_types 
+-------------------
+ t
+(1 row)
+
+-- Reset the success flag per probe/rescan, but retain total work over loops.
+-- The parameter affects only a residual predicate; the build is reusable.
+set local enable_material = off;
+select p->>'Actual Loops' = '3' as rescanned,
+       p->>'Diamond Build Matches' = '9' as cumulative_matches,
+       p->>'Diamond Tuples Emitted' = '6' as cumulative_outputs
+from diamond_plan($q$
+  select o.n,j.* from (values (1),(2),(3)) o(n)
+  cross join lateral (
+    select r.id,s.id from probe r join build s on r.k=s.k
+    where r.x<s.v+o.n offset 0
+  ) j
+$q$) p;
+ rescanned | cumulative_matches | cumulative_outputs 
+-----------+--------------------+--------------------
+ t         | t                  | t
+(1 row)
+
+-- A parameter inside the build's hash key must defeat hash-table reuse.
+select p->>'Actual Loops' = '3' as parameter_rescans,
+       p->>'Diamond Build Matches' = '9' as rebuilt_matches,
+       p->>'Diamond Tuples Emitted' = '9' as rebuilt_outputs
+from diamond_plan($q$
+  select o.n,j.* from (values (0),(1),(2)) o(n)
+  cross join lateral (
+    select r.id,s.id from probe r join build s on r.k=s.k+o.n offset 0
+  ) j
+$q$) p;
+ parameter_rescans | rebuilt_matches | rebuilt_outputs 
+-------------------+-----------------+-----------------
+ t                 | t               | t
+(1 row)
+
+-- JSON is checked above.  Other EXPLAIN formats must expose the same fields.
+do $$
+declare
+  fmt text;
+  ln text;
+  found boolean;
+begin
+  foreach fmt in array array['text','xml','yaml'] loop
+    found := false;
+    for ln in execute 'explain (analyze, costs off, timing off, format ' ||
+      fmt || ') select r.id,s.id from probe r join build s on r.k=s.k'
+    loop
+      found := found or ln like '%Diamond%';
+    end loop;
+    if not found then
+      raise exception 'missing Diamond statistics in %', fmt;
+    end if;
+  end loop;
+end;
+$$;
+-- One-to-one keys give an exact oracle across batch deferral and workers.
+create table batch_data as
+  select i as id, repeat('x',128) as payload from generate_series(1,20000) i;
+alter table batch_data set (parallel_workers = 2);
+analyze batch_data;
+set local work_mem = '64kB';
+set local hash_mem_multiplier = 1;
+select p->>'Diamond Hash Probes' = '20000' as probes_once_per_batch,
+       p->>'Diamond Successful Probes' = '20000' as successes,
+       p->>'Diamond Build Matches' = '20000' as matches,
+       p->>'Diamond Tuples Emitted' = '20000' as emitted,
+       (p#>>'{Plans,1,Hash Batches}')::int > 1 as spilled
+from diamond_plan('select l.id,l.payload,r.payload from batch_data l join batch_data r using(id)') p;
+ probes_once_per_batch | successes | matches | emitted | spilled 
+-----------------------+-----------+---------+---------+---------
+ t                     | t         | t       | t       | t
+(1 row)
+
+set local max_parallel_workers_per_gather = 2;
+set local min_parallel_table_scan_size = 0;
+set local parallel_setup_cost = 0;
+set local parallel_tuple_cost = 0;
+set local parallel_leader_participation = off;
+set local enable_parallel_hash = off;
+select p->>'Parallel Aware' = 'false' as private_hash,
+       p->>'Diamond Hash Probes' = '20000' as worker_probes,
+       p->>'Diamond Build Matches' = '20000' as worker_matches,
+       p->>'Diamond Tuples Emitted' = '20000' as emitted
+from diamond_plan('select count(*) from batch_data l join batch_data r using(id)') p;
+ private_hash | worker_probes | worker_matches | emitted 
+--------------+---------------+----------------+---------
+ t            | t             | t              | t
+(1 row)
+
+set local enable_parallel_hash = on;
+select p->>'Parallel Aware' = 'true' as shared_hash,
+       p->>'Diamond Hash Probes' = '20000' as worker_probes,
+       p->>'Diamond Successful Probes' = '20000' as worker_successes,
+       p->>'Diamond Build Matches' = '20000' as worker_matches,
+       p->>'Diamond Tuples Emitted' = '20000' as emitted
+from diamond_plan('select count(*) from batch_data l join batch_data r using(id)') p;
+ shared_hash | worker_probes | worker_successes | worker_matches | emitted 
+-------------+---------------+------------------+----------------+---------
+ t           | t             | t                | t              | t
+(1 row)
+
+-- Pattern from join_hash: force Gather below a nested loop so workers are
+-- relaunched.  A fresh worker's counters must add to its previous DSM slot.
+create table rescan_outer as select generate_series(1,3) as id;
+alter table rescan_outer set (parallel_workers = 0);
+analyze rescan_outer;
+select (p->>'Actual Loops')::int >= 3 as workers_rescanned,
+       p->>'Diamond Hash Probes' = '60000' as relaunched_probes,
+       p->>'Diamond Build Matches' = '60000' as relaunched_matches
+from diamond_plan($q$
+  select count(*) from rescan_outer o left join
+    (select l.id from batch_data l join batch_data r using(id)) j
+    on o.id<j.id+1 and o.id>j.id-1
+$q$) p;
+ workers_rescanned | relaunched_probes | relaunched_matches 
+-------------------+-------------------+--------------------
+ t                 | t                 | t
+(1 row)
+
+rollback;
