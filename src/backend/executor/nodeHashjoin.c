@@ -164,19 +164,25 @@
 
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "catalog/pg_am_d.h"
 #include "executor/executor.h"
 #include "executor/hashjoin.h"
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
 #include "miscadmin.h"
+#include "parser/parsetree.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/sharedtuplestore.h"
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
 /* Diamond-PG: diagnostic GUC only; never controls join planning/execution. */
 bool		diamond_hashjoin_stats = false;
+
+/* Diamond-PG: opt-in Phase 2 execution experiment; never changes planning. */
+bool		diamond_lookup_expand = false;
 
 
 /*
@@ -209,6 +215,7 @@ static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
 static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
 static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
 static void ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate);
+static bool ExecHashJoinCanLookupExpand(HashJoinState *hjstate);
 
 
 /* ----------------------------------------------------------------
@@ -438,6 +445,13 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 			case HJ_NEED_NEW_OUTER:
 
 				/*
+				 * Diamond-PG: release the old probe before advancing its
+				 * slot.
+				 */
+				if (node->hj_DiamondMatch)
+					memset(node->hj_DiamondMatch, 0, sizeof(DiamondHashMatch));
+
+				/*
 				 * We don't have an outer tuple, try to get the next one
 				 */
 				if (parallel)
@@ -542,6 +556,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					node->hj_DiamondMatched = false;
 				}
 
+				/*
+				 * Diamond-PG: Lookup retains one equality match in the
+				 * current resident batch.  Expand immediately consumes it
+				 * below; no child pull, residual qual, or batch reset
+				 * intervenes.  Native deferral above remains responsible for
+				 * all spill I/O.
+				 */
+				if (node->hj_DiamondMatch)
+				{
+					Assert(!parallel);
+					if (!ExecHashLookup(node->hj_DiamondMatch, node, econtext))
+						continue;
+				}
+
 				/* OK, let's scan the bucket for matches */
 				node->hj_JoinState = HJ_SCAN_BUCKET;
 
@@ -552,7 +580,19 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				/*
 				 * Scan the selected hash bucket for matches to current outer
 				 */
-				if (parallel)
+				if (node->hj_DiamondMatch)
+				{
+					Assert(!parallel);
+					Assert(node->hj_DiamondMatch->table == hashtable);
+					if (!ExecHashExpand(node->hj_DiamondMatch, node->hashclauses,
+										node->hj_HashTupleSlot, econtext))
+					{
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+						continue;
+					}
+					node->hj_CurTuple = node->hj_DiamondMatch->current;
+				}
+				else if (parallel)
 				{
 					if (!ExecParallelScanHashBucket(node, econtext))
 					{
@@ -797,6 +837,9 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				break;
 
 			case HJ_NEED_NEW_BATCH:
+				/* Diamond-PG: no iterator may outlive batchCxt's tuples. */
+				Assert(node->hj_DiamondMatch == NULL ||
+					   node->hj_DiamondMatch->table == NULL);
 
 				/*
 				 * Try to advance to next batch.  Done if there are no more.
@@ -1087,7 +1130,67 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_MatchedOuter = false;
 	hjstate->hj_OuterNotEmpty = false;
 
+	/* Diamond-PG: latch eligibility once; no allocation on native fallback. */
+	if (diamond_lookup_expand && ExecHashJoinCanLookupExpand(hjstate))
+		hjstate->hj_DiamondMatch = palloc0_object(DiamondHashMatch);
+
 	return hjstate;
+}
+
+/*
+ * Diamond-PG: return whether immediate Lookup/Expand has a proved lifetime
+ * contract for this initialized HashJoin.  Limit Phase 2 to serial inner joins
+ * over two direct regular heap SeqScans and strict, simple column hash keys.
+ * Resolve slot Vars through scan target lists too: setrefs can replace an
+ * expression key by a Var referring to a computed scan output.  Unsupported
+ * plans/operators keep native execution, including private hashes in workers.
+ * Residual quals/projection remain in the native per-pair path unchanged.
+ */
+static bool
+ExecHashJoinCanLookupExpand(HashJoinState *hjstate)
+{
+	HashJoin   *join = castNode(HashJoin, hjstate->js.ps.plan);
+	Hash	   *hash = castNode(Hash, innerPlan(join));
+	PlanState  *scans[2] = {outerPlanState(hjstate),
+	outerPlanState(innerPlanState(hjstate))};
+	List	   *keys[2] = {join->hashkeys, hash->hashkeys};
+	ListCell   *lc;
+	int			i;
+
+	/* es_use_parallel_mode is set only later, in ExecutePlan. */
+	if (hjstate->js.ps.state->es_plannedstmt->parallelModeNeeded ||
+		join->join.jointype != JOIN_INNER || join->join.plan.parallel_aware ||
+		IsParallelWorker())
+		return false;
+	foreach(lc, join->hashoperators)
+	{
+		if (!op_strict(lfirst_oid(lc)))
+			return false;
+	}
+	for (i = 0; i < 2; i++)
+	{
+		Relation	rel;
+
+		if (!IsA(scans[i]->plan, SeqScan) || scans[i]->plan->parallel_aware)
+			return false;
+		rel = castNode(SeqScanState, scans[i])->ss.ss_currentRelation;
+		if (rel->rd_rel->relkind != RELKIND_RELATION ||
+			rel->rd_rel->relam != HEAP_TABLE_AM_OID)
+			return false;
+		foreach(lc, keys[i])
+		{
+			Var		   *key = lfirst(lc);
+			TargetEntry *tle;
+
+			if (!IsA(key, Var) || key->varattno <= 0)
+				return false;
+			tle = get_tle_by_resno(scans[i]->plan->targetlist, key->varattno);
+			if (tle == NULL || !IsA(tle->expr, Var) ||
+				((Var *) tle->expr)->varattno <= 0)
+				return false;
+		}
+	}
+	return true;
 }
 
 /* ----------------------------------------------------------------
@@ -1100,6 +1203,10 @@ void
 ExecEndHashJoin(HashJoinState *node)
 {
 	HashState  *hashNode = castNode(HashState, innerPlanState(node));
+
+	/* Diamond-PG: discard borrowed references before destroying their owners. */
+	if (node->hj_DiamondMatch)
+		memset(node->hj_DiamondMatch, 0, sizeof(DiamondHashMatch));
 
 	/*
 	 * Free tuple stores if we made them (must do this before
@@ -1691,6 +1798,10 @@ ExecReScanHashJoin(HashJoinState *node)
 	PlanState  *outerPlan = outerPlanState(node);
 	PlanState  *innerPlan = innerPlanState(node);
 
+	/* Diamond-PG: invalidate even a partially expanded probe before rebuild. */
+	if (node->hj_DiamondMatch)
+		memset(node->hj_DiamondMatch, 0, sizeof(DiamondHashMatch));
+
 	/*
 	 * We're always going to rescan the outer rel, so drop the associated
 	 * null-keys tuplestore; we'll rebuild it during the rescan.  (Must do
@@ -1806,6 +1917,16 @@ ExecReScanHashJoin(HashJoinState *node)
 void
 ExecShutdownHashJoin(HashJoinState *node)
 {
+	/*
+	 * Diamond-PG: shutdown also runs between forward-only cursor FETCHes.
+	 * Retain an unfinished expansion: its private table/probe still live in
+	 * the query context, and the detach calls below free only shared storage.
+	 * End/rescan, not this resumable pause, invalidate borrowed references.
+	 */
+	Assert(node->hj_DiamondMatch == NULL ||
+		   node->hj_DiamondMatch->table == NULL ||
+		   node->hj_DiamondMatch->table->parallel_state == NULL);
+
 	/*
 	 * Diamond-PG: each worker owns its slot, so no atomics are needed.  Add
 	 * deltas rather than overwrite: a Gather can relaunch fresh workers into

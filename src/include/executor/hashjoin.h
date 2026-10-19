@@ -103,6 +103,30 @@ typedef struct HashJoinTupleData
 	((MinimalTuple) ((char *) (hjtup) + HJTUPLE_OVERHEAD))
 
 /*
+ * Diamond-PG: bounded first-match iterator (paper Section 3.2), not an eager
+ * list of matches.  Lookup finds current; Expand consumes it once, then scans
+ * the remaining collision chain with equality rechecks.  The record lives in
+ * the query context, but owns neither table nor probe.  Immediate expansion
+ * retains the probe slot without pulling its child again; simple Var keys
+ * therefore survive expression-context resets without copying key Datums.
+ *
+ * References expire before the next probe, batch reset, rescan or query end.
+ * A forward-only cursor FETCH may pause expansion while both owners live.
+ * table == NULL denotes an empty/invalidated cursor.  This private pointer
+ * representation must never cross a parallel, spill or materialization
+ * boundary; only native tuples spill, before Lookup starts in their batch.
+ */
+typedef struct DiamondHashMatch
+{
+	HashJoinTable table;
+	HashJoinTuple current;
+	TupleTableSlot *probe;
+	uint32		hashvalue;
+	int			batchno;
+	bool		first_pending;
+} DiamondHashMatch;
+
+/*
  * If the outer relation's distribution is sufficiently nonuniform, we attempt
  * to optimize the join by treating the hash values corresponding to the outer
  * relation's MCVs specially.  Inner relation tuples matching these hash

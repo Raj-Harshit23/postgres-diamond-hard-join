@@ -18,6 +18,7 @@
 #include "nodes/execnodes.h"
 
 struct SharedHashJoinBatch;
+struct DiamondHashMatch;
 
 extern HashState *ExecInitHash(Hash *node, EState *estate, int eflags);
 extern Node *MultiExecHash(HashState *node);
@@ -47,6 +48,10 @@ extern void ExecHashGetBucketAndBatch(HashJoinTable hashtable,
 									  int *bucketno,
 									  int *batchno);
 extern bool ExecScanHashBucket(HashJoinState *hjstate, ExprContext *econtext);
+extern bool ExecHashLookup(struct DiamondHashMatch *match,
+						   HashJoinState *hjstate, ExprContext *econtext);
+extern bool ExecHashExpand(struct DiamondHashMatch *match, ExprState *hashclauses,
+						   TupleTableSlot *slot, ExprContext *econtext);
 extern bool ExecParallelScanHashBucket(HashJoinState *hjstate, ExprContext *econtext);
 extern void ExecPrepHashTableForUnmatched(HashJoinState *hjstate);
 extern bool ExecParallelPrepHashTableForUnmatched(HashJoinState *hjstate);

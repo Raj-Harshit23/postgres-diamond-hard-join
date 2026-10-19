@@ -2215,6 +2215,7 @@ typedef struct MergeJoinState
 /* these structs are defined in executor/hashjoin.h: */
 typedef struct HashJoinTupleData *HashJoinTuple;
 typedef struct HashJoinTableData *HashJoinTable;
+struct DiamondHashMatch;
 
 typedef struct HashJoinState
 {
@@ -2241,6 +2242,9 @@ typedef struct HashJoinState
 	DiamondHashJoinInstrumentation *hj_DiamondStats;
 	SharedDiamondHashJoinInfo *hj_DiamondShared;
 	bool		hj_DiamondMatched;	/* probe has an equality match? */
+
+	/* Diamond-PG: optional query-owned immediate Lookup/Expand cursor. */
+	struct DiamondHashMatch *hj_DiamondMatch;
 } HashJoinState;
 
 

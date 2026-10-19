@@ -13020,6 +13020,33 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-lookup-expand" xreflabel="diamond_lookup_expand">
+      <term><varname>diamond_lookup_expand</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>diamond_lookup_expand</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: enable experimental first-match Lookup followed immediately
+        by Expand inside eligible native hash joins. The default is
+        <literal>off</literal>. Eligibility is selected at executor initialization:
+        only serial inner joins over two direct sequential scans of regular heap
+        relations, with strict hashable equality on simple columns, use this path.
+        Other plans retain native execution, including parallel joins, other join
+        types and expression keys. Hash batching and skew storage remain native;
+        a cursor never survives its probe or resident batch. Residual conditions
+        and projection are evaluated for each enumerated pair as usual.
+       </para>
+       <para>
+        <command>EXPLAIN</command> reports <literal>Diamond Lookup Expand: true</literal>
+        on nodes using this path. This setting does not change planning or
+        independently schedule operators, and makes no performance claim.
+        <varname>diamond_hashjoin_stats</varname> is controlled separately.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-ignore-system-indexes" xreflabel="ignore_system_indexes">
       <term><varname>ignore_system_indexes</varname> (<type>boolean</type>)
       <indexterm>

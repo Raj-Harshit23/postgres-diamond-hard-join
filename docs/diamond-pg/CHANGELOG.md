@@ -1,5 +1,72 @@
 # Diamond-PG changelog
 
+File changes and reasons are recorded here; [TESTING.md](TESTING.md) owns
+runnable commands, observed results and evidence paths. Execution flow,
+ownership and paper mapping are in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## 2026-10-19 - Phase 2: immediate Lookup/Expand (uncommitted)
+
+Authorized by the user after Phase 1. Selected the paper's first-match cursor
+over eager match arrays/copies. This proves immediate decomposition inside
+HashJoin; it does not implement independent scheduling or Diamond planning.
+
+| File | Change |
+| --- | --- |
+| `src/include/executor/hashjoin.h` | DiamondHashMatch: bounded query-owned descriptor borrowing the probe slot and one resident hash batch |
+| `src/include/nodes/execnodes.h` | Optional HashJoinState.hj_DiamondMatch pointer; no Plan/node serialization change |
+| `src/backend/executor/nodeHash.c` | ExecHashLookup retains the first equality match; ExecHashExpand consumes it once and resumes; common ExecHashScanBucket preserves native collision/equality checks and checks interrupts |
+| `src/include/executor/nodeHash.h` | Lookup/Expand API declarations |
+| `src/backend/executor/nodeHashjoin.c` | Simple strict-key/direct heap scan eligibility; parallel-mode/worker fallback; immediate Lookup/Expand dispatch; cursor invalidation before probe changes, rescans/end; preserve paused FETCH state during shutdown; batch-lifetime assertion |
+| `src/include/executor/nodeHashjoin.h` | diamond_lookup_expand declaration; existing guc_tables.c include suffices |
+| `src/backend/utils/misc/guc_parameters.dat` | Off-by-default PGC_USERSET experimental execution control; generator input only |
+| `src/backend/commands/explain.c` | Latched Diamond Lookup Expand boolean property, including plain EXPLAIN |
+| `doc/src/sgml/config.sgml` | Document execution scope, default, fallback, lifetime and EXPLAIN property |
+| `src/test/regress/sql/diamond_hashjoin.sql` | Extend existing test with path-checked off/on bag comparisons, collisions, lifecycle, batch/skew and fallback cases |
+| `src/test/regress/expected/diamond_hashjoin.out` | Reviewed expected output; all boolean oracles true |
+| `AGENTS.md` | Phase 2 authorization/completion; Phase 3 requires user direction |
+| `docs/diamond-pg/ARCHITECTURE.md` | Cursor decision, exact fields/functions, flow, borrowing/cleanup contract and restricted eligibility |
+| `docs/diamond-pg/IMPLEMENTATION_PLAN.md` | Phase 2 complete; distinguish immediate proof from Phase 3's ownership/transport work |
+| `docs/diamond-pg/EXECPLAN.md` | Uncommitted handoff, validation/limitation and next authorized boundary |
+| `docs/diamond-pg/TESTING.md` | Runnable build/regression/runtime/sanitizer commands, actual results and evidence |
+| `docs/diamond-pg/CHANGELOG.md` | This file/change/validation ledger |
+
+Validation: assertion/debug build and targeted test passed; **all 240 core
+tests passed**, including existing join/hash/subselect/partition/EXPLAIN tests.
+Off/on EXCEPT ALL checks preserve duplicates/NULLs, multi-column and text keys,
+residual/projection results, unique matches, empty/no matches, NO SCROLL FETCH
+pause/resume, partial rescans, parameterized and spilled rebuilds, and skew.
+Collision keys produce exactly
+six equality matches; volatile residuals execute once per candidate. Outer,
+semi, anti, inequality, expression and private/shared/forced-parallel plans
+retain native execution. Plain EXPLAIN confirms unchanged native plan structure
+apart from the new execution-choice property.
+Review caught that shutdown also runs between FETCHes; keeping the private
+cursor live until rescan/end preserves native resumability.
+
+Real 500ms timeout caught after entering a residual with a live match; the
+following 16-batch join reported 20,000 for all four counters. JSON plans and
+notice log retained; server stopped. Native pgindent and diff checks passed.
+ASan build passed, but its test stopped before SQL: LeakSanitizer reports
+777 bytes in unchanged save_ps_display_args during postgres -V. No sanitizer,
+benchmark, check-world or performance pass is claimed. Details/evidence are
+in [TESTING.md](TESTING.md#actual-validation-ledger).
+
+No source/helper/Markdown files were added; generated validation output stays
+in ignored .work. No commit or push was made. Suggested message:
+`diamond-pg: add immediate hash lookup and expand`.
+
+## 2026-10-19 - Post-commit documentation audit (uncommitted)
+
+- `AGENTS.md`: make automatic maintenance of affected documents explicit;
+  record the completed Phase 1 checkpoint.
+- `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`, `EXECPLAN.md`: distinguish the
+  PostgreSQL base from project commits and remove stale pre-commit status.
+- `TESTING.md`: correct pre-instrumentation wording and connect validation
+  commands to actual logs/plans; distinguish initial expected-output capture
+  from the passing suite. `CHANGELOG.md`: record the actual commit IDs and
+  this audit. All 18 Phase 1 changed files match the file table below.
+- Documentation only; no executor changes or new test runs in this audit.
+
 ## 2026-10-19 - Phase 1: optional native HashJoin instrumentation
 
 Based on the user's Phase 0 commit `7756e8e52e`; authorized to proceed with
@@ -52,12 +119,14 @@ or duplicate merging. Native emitted-row merging remains independent.
 - pgindent check passed on touched C/headers with the two added typedefs.
   Final diff/whitespace review passed. Private server stopped.
 
-Commands and ignored evidence paths are in TESTING.md. No sanitizer,
-check-world, benchmark or performance result is claimed. This is baseline
-instrumentation, not a Lookup/Expand implementation. The user requested the
-Phase 1 checkpoint commit after review. No push or remote operation is authorized.
+Commands and ignored evidence paths are in
+[TESTING.md](TESTING.md#actual-validation-ledger). No sanitizer, check-world,
+benchmark or performance result is claimed. This is baseline
+instrumentation, not a Lookup/Expand implementation. Committed at the user's
+request as `14ac927a8b`, using the user's author/committer identity without AI
+co-author attribution. Nothing was pushed.
 
-Suggested commit: `diamond-pg: add baseline hash join instrumentation`.
+Commit: `14ac927a8b` - `diamond-pg: add baseline hash join instrumentation`.
 
 ## 2026-10-19 - Phase 0: mapping and baseline validation
 
@@ -105,9 +174,8 @@ supported workflow. Do not add speculative scaffolding or redundant files.
 
 ### Limits and handoff
 
-This validates native PostgreSQL only. No Diamond counters/execution,
-Diamond off/on tests, sanitizer run or benchmarks exist yet. Phase 1's
-architecture is documented; its implementation still needs user direction.
-Nothing was staged, committed or pushed.
-
-Suggested commit: `diamond-pg: document architecture and validated baseline`.
+At Phase 0 completion, this validated native PostgreSQL only. No Diamond
+counters/execution, Diamond off/on tests, sanitizer runs or benchmarks existed.
+Phase 1's architecture was documented; its implementation awaited direction.
+The user subsequently committed this checkpoint as `7756e8e52e`:
+`diamond-pg: document architecture and validated baseline`. Nothing was pushed.

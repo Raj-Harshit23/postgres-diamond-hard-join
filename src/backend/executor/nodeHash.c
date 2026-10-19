@@ -43,6 +43,9 @@
 #include "utils/tuplestore.h"
 #include "utils/wait_event.h"
 
+static HashJoinTuple ExecHashScanBucket(HashJoinTuple tuple, uint32 hashvalue,
+										ExprState *hashclauses, TupleTableSlot *slot,
+										ExprContext *econtext);
 static void ExecHashIncreaseNumBatches(HashJoinTable hashtable);
 static void ExecHashIncreaseNumBuckets(HashJoinTable hashtable);
 static void ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable);
@@ -2018,7 +2021,6 @@ bool
 ExecScanHashBucket(HashJoinState *hjstate,
 				   ExprContext *econtext)
 {
-	ExprState  *hjclauses = hjstate->hashclauses;
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
@@ -2037,32 +2039,112 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	else
 		hashTuple = hashtable->buckets.unshared[hjstate->hj_CurBucketNo];
 
-	while (hashTuple != NULL)
+	hashTuple = ExecHashScanBucket(hashTuple, hashvalue, hjstate->hashclauses,
+								   hjstate->hj_HashTupleSlot, econtext);
+	if (hashTuple == NULL)
+		return false;
+	hjstate->hj_CurTuple = hashTuple;
+	return true;
+}
+
+/*
+ * Diamond-PG: common serial scanner for native probing and deferred Expand.
+ * Starting at tuple (inclusive), return the next hash/equality match or NULL,
+ * installing each candidate in slot for hashclauses.  Neither the table nor
+ * tuple ownership changes.  Keeping one equality recheck loop prevents the
+ * two paths from disagreeing on collisions, collation or strict NULLs.
+ */
+static HashJoinTuple
+ExecHashScanBucket(HashJoinTuple tuple, uint32 hashvalue,
+				   ExprState *hashclauses, TupleTableSlot *slot,
+				   ExprContext *econtext)
+{
+	while (tuple != NULL)
 	{
-		if (hashTuple->hashvalue == hashvalue)
+		/* A collision chain can be long even when no row is returned. */
+		CHECK_FOR_INTERRUPTS();
+		if (tuple->hashvalue == hashvalue)
 		{
 			TupleTableSlot *inntuple;
 
 			/* insert hashtable's tuple into exec slot so ExecQual sees it */
-			inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(hashTuple),
-											 hjstate->hj_HashTupleSlot,
+			inntuple = ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(tuple),
+											 slot,
 											 false);	/* do not pfree */
 			econtext->ecxt_innertuple = inntuple;
 
-			if (ExecQualAndReset(hjclauses, econtext))
-			{
-				hjstate->hj_CurTuple = hashTuple;
-				return true;
-			}
+			if (ExecQualAndReset(hashclauses, econtext))
+				return tuple;
 		}
 
-		hashTuple = hashTuple->next.unshared;
+		tuple = tuple->next.unshared;
+	}
+	return NULL;
+}
+
+/*
+ * Diamond-PG: Lookup initializes match from the admitted probe in hjstate.
+ * Return false for no equality match; otherwise retain only the first match,
+ * its table/batch and the borrowed probe slot.  Do not enumerate duplicates
+ * or evaluate residual quals here.  Native scanning handles main/skew bucket
+ * selection and equality once; Expand must not re-evaluate this first match.
+ */
+bool
+ExecHashLookup(DiamondHashMatch *match, HashJoinState *hjstate,
+			   ExprContext *econtext)
+{
+	Assert(match->table == NULL);
+	Assert(hjstate->hj_HashTable->parallel_state == NULL);
+	Assert(hjstate->hj_CurTuple == NULL);
+	if (!ExecScanHashBucket(hjstate, econtext))
+		return false;
+
+	match->table = hjstate->hj_HashTable;
+	match->current = hjstate->hj_CurTuple;
+	match->probe = econtext->ecxt_outertuple;
+	match->hashvalue = hjstate->hj_CurHashValue;
+	match->batchno = match->table->curbatch;
+	match->first_pending = true;
+	return true;
+}
+
+/*
+ * Diamond-PG: Expand returns the retained first match once, then advances the
+ * cursor independently of HashJoinState's native scanner fields.  Inputs are
+ * the live match, compiled equality, destination slot and expression context;
+ * true installs one matching build tuple alongside the retained probe.  False
+ * means exhaustion and invalidates all borrowed references.  The caller must
+ * retain the probe/table batch and apply residual quals/projection per pair.
+ */
+bool
+ExecHashExpand(DiamondHashMatch *match, ExprState *hashclauses,
+			   TupleTableSlot *slot, ExprContext *econtext)
+{
+	Assert(match->table != NULL);
+	Assert(match->table->parallel_state == NULL);
+	Assert(match->batchno == match->table->curbatch);
+	Assert(match->current != NULL);
+	econtext->ecxt_outertuple = match->probe;
+
+	if (match->first_pending)
+	{
+		/* The first match was already equality-checked by Lookup. */
+		match->first_pending = false;
+		econtext->ecxt_innertuple =
+			ExecStoreMinimalTuple(HJTUPLE_MINTUPLE(match->current), slot, false);
+		return true;
+	}
+	match->current = ExecHashScanBucket(match->current->next.unshared,
+										match->hashvalue, hashclauses,
+										slot, econtext);
+
+	if (match->current == NULL)
+	{
+		memset(match, 0, sizeof(*match));
+		return false;
 	}
 
-	/*
-	 * no match
-	 */
-	return false;
+	return true;
 }
 
 /*

@@ -26,13 +26,22 @@ code; do not add noisy comments that merely restate individual lines.
 Maintain concise, accurate documentation of decisions, exact runnable
 commands, changes, and actual test results. Record meaningful steps in the
 changelog without duplicating explanations across files or adding boilerplate.
+Automatically update the affected existing project documents whenever code,
+architecture, plans, commands, test results, limitations, phase status, or
+commit status changes. This is part of completing the work, not a separate
+task for the user to request. Before reporting completion, check that the
+documentation matches the actual repository and validation state, including
+after a commit. Keep updates concise; do not touch unaffected documents just
+to repeat the same information.
 Use system-installed dependencies and standard configure/make/psql commands.
 Keep generated builds, clusters, and useful validation output in one ignored,
 persistent project directory. Do not use /tmp dependency/build workarounds.
 
-The user authorized Phase 1 after committing the Phase 0 baseline. Complete
-only native HashJoin instrumentation and its validation in this milestone.
-Do not advance to Phase 2 or another major phase without user direction.
+Phase 1 native HashJoin instrumentation and validation are complete and
+committed as `14ac927a8b`, following the Phase 0 commit `7756e8e52e`.
+Phase 2 first-match representation with immediate Lookup/Expand is implemented
+and validated in the uncommitted working tree; TESTING.md records evidence and
+the sanitizer limitation. Do not advance to Phase 3 without user direction.
 
 Before substantial work, read:
 

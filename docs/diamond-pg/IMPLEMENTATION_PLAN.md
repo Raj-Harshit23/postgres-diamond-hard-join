@@ -10,7 +10,7 @@ map and design explanation; EXECPLAN.md is the session continuation guide.
 | --- | --- | --- |
 | 0: repository/paper mapping | Complete; system-package build, 239 regressions and runtime fixtures passed | Native planner/executor traces, paper mapping, invariants, tests, next-phase proposal; no functional changes |
 | 1: native instrumentation | Complete; build, all 240 regressions and two-worker runtime checks passed | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
-| 2: match representation | Not started | Lookup immediately followed by Expand matches native results with duplicates, NULLs, filters, projections, rescans |
+| 2: match representation | Complete, uncommitted; assertion/debug build, targeted test, 240 core tests and timeout/recovery passed; sanitizer execution blocked before SQL | First-match cursor with immediate Expand inside eligible serial inner HashJoins; native alternatives/fallback preserved |
 | 3: first-class operations | Not started | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
 | 4: acyclic plans | Not started | Eligible alpha-acyclic inner-equijoin regions; legal paper-derived scheduling; native alternatives retained |
 | 5: cost and selection | Not started | Cost-based competition plus optional experimental controls; eligible does not mean forced |
@@ -73,29 +73,35 @@ retrieval folds totals into query-owned memory rather than copying DSM.
 Developer settings use GUC_NOT_IN_SAMPLE, so no sample configuration changes.
 No speedup claim, sanitizer run, or Lookup/Expand execution is implied.
 
-Suggested commit: `diamond-pg: add baseline hash join instrumentation`.
+Committed as `14ac927a8b`: `diamond-pg: add baseline hash join instrumentation`.
 
 ## Phase 2: match representation
 
-Inspect/change `nodeHashjoin.c`, `execnodes.h`, and, as needed,
-`executor/hashjoin.h`, `nodeHash.c`, `nodeHash.h`; add test and control
-documentation. Compare eager copied/reference arrays with a lazy
-first-match cursor using exact storage/lifetime/collision semantics.
-ARCHITECTURE.md provisionally favors the paper-aligned cursor; Phase 2
-must review the detailed descriptor before implementation.
+Authorized by the user after Phase 1. Selected a bounded first-match cursor
+over eager arrays/copies. `DiamondHashMatch`, `ExecHashLookup()` and
+`ExecHashExpand()` retain the first equality match and lazily enumerate the
+rest. ARCHITECTURE.md specifies fields, execution flow, eligibility and the
+borrowed probe/batch lifetime contract.
 
-Separate first-match discovery from remaining enumeration but immediately
-expand, with no reordering or new plan shape. Initial eligible execution
-should be tightly restricted to the documented inner-equijoin class.
-Determine whether the first proof supports native batches with complete
-drain-before-reset or explicitly restricts/falls back before partial output.
-Do not keep references into reset batch storage or redo volatile qualifiers.
+`diamond_lookup_expand` defaults off. Eligible serial inner joins over direct
+heap SeqScans with simple strict hash keys use immediate expansion; other
+plans remain native. Native batching/skew remain supported: expansion drains
+or is discarded before the next probe/reset. No Path/Plan/node, optimizer,
+hash storage format or independent scheduling is introduced.
 
-Acceptance includes zero/one/many matches, duplicate probe/build keys,
-strict NULLs, multiple keys/columns, residual filters, projections,
-empty relations, LIMIT/cancellation, rescan, changed parameters, and
-cleanup. Phase 2 cannot claim independent scheduling merely because two
-helpers exist inside HashJoin.
+Extended the existing diamond_hashjoin test with positive execution markers,
+off/on EXCEPT ALL comparisons, collisions, text/multi-column keys, volatile
+residuals, unique matches, empty/no matches, forward-only FETCH pause/resume,
+partial/rescanned expansion, parameterized and spilled rebuilds, skew,
+cancellation/error cleanup, and
+parallel/native fallback. All 240 core regressions and the targeted test pass.
+A real timeout interrupted a live residual; a following 16-batch join returned
+20,000 matches with all four counters correct. The ASan build passed, but its
+test could not initialize because LeakSanitizer reports unchanged PostgreSQL
+startup allocations during `postgres -V`. No sanitizer test pass is claimed.
+Exact commands/results and evidence are recorded in TESTING.md.
+
+Suggested commit: `diamond-pg: add immediate hash lookup and expand`.
 
 ## Phase 3: independently represented execution
 
@@ -195,8 +201,8 @@ paper's absolute-number reproduction on different hardware/configuration.
 
 ## Decisions still requiring design review
 
-1. Cursor versus eager match representation and independence from mutable
-   HashJoinState expression slots; evaluated key ownership.
+1. Generalize the immediate cursor's borrowed slots into independently owned
+   deferred heads/keys; eager arrays were rejected for Phase 2.
 2. Internal payload/slot protocol, nested Lookup build storage, and safe
    treatment of Material/Sort/Gather/spill and parameterized execution.
 3. L&E optimizer state identity and path-pruning equivalence classes;

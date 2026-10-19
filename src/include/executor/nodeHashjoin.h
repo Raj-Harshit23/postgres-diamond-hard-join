@@ -19,6 +19,7 @@
 #include "storage/buffile.h"
 
 extern PGDLLIMPORT bool diamond_hashjoin_stats;
+extern PGDLLIMPORT bool diamond_lookup_expand;
 
 extern HashJoinState *ExecInitHashJoin(HashJoin *node, EState *estate, int eflags);
 extern void ExecEndHashJoin(HashJoinState *node);

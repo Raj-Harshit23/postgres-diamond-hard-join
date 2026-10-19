@@ -1,17 +1,19 @@
 # Diamond-PG architecture and Phase 0 source map
 
-Last updated: 2026-10-19. **Phase 1 adds optional native HashJoin counters.**
-Lookup/Expand execution and planner paths remain future work; identifiers in
-those design sections are proposals.
+Last updated: 2026-10-19. **Phase 2 adds opt-in immediate Lookup/Expand
+inside eligible native HashJoins**, alongside Phase 1 counters. Independent
+operators and Diamond planner paths remain future work.
 
 ## Reproducible base and audit scope
 
 | Item | Observed value |
 | --- | --- |
 | Source version | PostgreSQL **20devel**, from `configure.ac:20` |
-| Local base/HEAD | `6296e78c3d2c7406bb450c5ae477b2fef58f155e` |
-| HEAD subject | Add "own_hash" to pg_stat_kind_info |
-| HEAD author timestamp | 2026-10-13 13:47:25 +0900 |
+| PostgreSQL source base | `6296e78c3d2c7406bb450c5ae477b2fef58f155e` |
+| Base subject | Add "own_hash" to pg_stat_kind_info |
+| Base author timestamp | 2026-10-13 13:47:25 +0900 |
+| Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b` |
+| Current working tree | Phase 2 immediate Lookup/Expand; validated, uncommitted |
 | Working branch | `diamond-pg`, created locally from the above HEAD |
 | Origin | `https://github.com/Raj-Harshit23/postgres-diamond-hard-join.git` |
 | Initial tracked diff | Empty, including the index |
@@ -19,8 +21,9 @@ those design sections are proposals.
 | Upstream remote | Absent; no fetch or independent upstream-base verification |
 
 This is the exact local baseline, not a claim that a remote upstream ref was
-verified. `origin/master` pointed at the same commit at audit time. No remote
-operation, commit, push, merge, rebase, or PR was performed.
+verified. `origin/master` pointed at the base commit at the initial audit.
+The two project checkpoints above were subsequently committed locally; no
+push, merge, rebase, or PR has been performed.
 
 The repository is the PostgreSQL source tree: `src/backend`, `src/include`,
 clients/interfaces, `src/test`, `contrib`, `doc/src/sgml`, build configuration,
@@ -36,7 +39,9 @@ filter). The three-table fixture probes f/builds h at the lower HashJoin,
 emitting 8 rows; the upper join builds t and emits 4. Thus the lower input
 orientation differs from the illustrative source trace below, as allowed.
 Exact expected-result and native hash/non-hash multiset checks passed.
-Commands and evidence paths are in TESTING.md; no Diamond behavior exists.
+Commands and evidence paths are in TESTING.md. These are Phase 0 results;
+Phase 1 instrumentation and Phase 2's restricted immediate execution are
+described below; these baseline measurements did not use either feature.
 
 ## Research basis
 
@@ -328,12 +333,10 @@ also change. No Path/Plan node is needed merely to prove immediate L&E.
 | Eager array/list of matching tuple references or copies | Explicit multiplicity and enumeration | O(fanout) work/state before the next selective Lookup; copies amplify memory; references still depend on batch lifetime |
 | First-match cursor plus stable probe/key context | Closest to paper; bounded initial handle; defer remaining scan | Must recheck collisions, retain keys, isolate cursor/slots, define reset/owner lifetime; no O(1) match-count guarantee |
 
-Recommend investigating the cursor design in Phase 2, using existing
-bucket-scan semantics and immediate expansion first. The choice is
-**provisional**, not an approved lifetime/spill protocol. An eager prototype
-cannot be described as the final paper-efficient Lookup. Neither design
-gives Expand3 the per-key match counts or secondary composite-key indexes
-it needs; PostgreSQL's mixed-key bucket length is not a match-set length.
+Phase 2 selects the first-match cursor and immediate expansion with the
+restricted lifetime contract below. It avoids an O(fanout) reference array
+or copied match list. This does not supply Expand3's per-key match counts or
+secondary indexes: a mixed-key bucket length is not a match-set length.
 
 **Phase 3:** independently schedulable operations require a new internal
 stream contract, proposed Lookup/Expand PlanStates and Plans, and a way to
@@ -435,3 +438,59 @@ no sample configuration or generated GUC file is edited.
 
 Regression coverage and exact commands/results are in TESTING.md. No Path,
 Plan, costing, hash storage, or join-search changes are needed for Phase 1.
+
+## Phase 2: first-match cursor with immediate Expand
+
+`diamond_lookup_expand` is an off-by-default developer GUC, independent of
+`diamond_hashjoin_stats`. It selects execution at node initialization without
+changing planner alternatives, costs or Plan nodes. EXPLAIN's boolean
+`Diamond Lookup Expand` property records that selection, including in plain
+EXPLAIN; absence means native execution. An unexecuted node can still have
+this property, so execution evidence also requires ANALYZE/Actual Loops.
+
+`ExecHashJoinCanLookupExpand()` checks two direct SeqScans over regular heap
+relations, JOIN_INNER, and strict hash operators with simple column keys.
+It follows slot Vars through scan target lists, rejecting computed keys
+which setrefs has hidden behind a Var. It rejects parallel-mode statements
+(including forced Gather), parallel-aware scans/joins and worker execution.
+Other join types, expression keys, index/foreign scans, intermediate join
+inputs and unsupported plans remain native. Scan filters may contain
+parameters; native chgParam handling still controls hash reuse/rebuild.
+
+`DiamondHashMatch` in `executor/hashjoin.h` is a query-owned, bounded record
+of the table, current matching tuple, probe slot, saved hash, batch number
+and first-match-pending flag. It borrows tuple storage, allocates no match
+array, and holds no Datums allocated in the resettable expression context.
+The probe child is not pulled during expansion, so its slot and by-reference
+column values remain valid. This borrowing contract applies only to immediate
+expansion; it is not Phase 3's transport/ownership contract.
+
+Execution in `nodeHashjoin.c` / `nodeHash.c`:
+
+1. HJ_NEED_NEW_OUTER invalidates any previous descriptor before pulling the
+   child. Native hashing, strict-NULL rejection, main/skew bucket selection
+   and future-batch deferral run first.
+2. `ExecHashLookup()` calls the serial scanner once to find the first true
+   equality match. No match rejects this inner-join probe. Success retains
+   only the first-match iterator and enters HJ_SCAN_BUCKET.
+3. `ExecHashExpand()` consumes the retained match once without repeating its
+   equality test. Later pulls scan from its next chain link using the shared
+   `ExecHashScanBucket()` helper, rechecking both hash and equality. The helper
+   also serves native serial probing and checks cancellation within a chain.
+4. Each returned pair goes through the existing counters, residual joinqual,
+   single-match rule, otherqual and projection. Volatile residual effects
+   occur once per consumed pair, in native order. Expand does not fetch or
+   prequalify the remaining duplicates at Lookup time.
+5. Exhaustion, the next probe, rescan and end clear borrowed references,
+   including query end after LIMIT. Shutdown can also run between forward-only
+   cursor FETCHes: it preserves unfinished expansion because native detach
+   frees only shared storage and this cursor's private table/probe remain
+   live. An assertion before batch transition forbids a live cursor across
+   batchCxt reset. Native query-context/error cleanup handles cancellation;
+   no separate allocation, resource owner or cleanup callback is introduced.
+
+Native batching, repartition and skew storage remain supported because a
+probe is expanded entirely within its resident batch. Only native tuples
+and saved hashes spill; a cursor never does. This is immediate decomposition,
+not independent scheduling, a new executor node, acyclic planning or a
+speedup result. Commands, test evidence and limitations are in TESTING.md.

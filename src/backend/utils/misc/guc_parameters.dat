@@ -818,6 +818,13 @@
   boot_val => 'false',
 },
 
+{ name => 'diamond_lookup_expand', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Enables experimental immediate Lookup/Expand for eligible serial hash joins.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'diamond_lookup_expand',
+  boot_val => 'false',
+},
+
 { name => 'dynamic_library_path', type => 'string', context => 'PGC_SUSET', group => 'CLIENT_CONN_OTHER',
   short_desc => 'Sets the path for dynamically loadable modules.',
   long_desc => 'If a dynamically loadable module needs to be opened and the specified name does not have a directory component (i.e., the name does not contain a slash), the system will search this path for the specified file.',

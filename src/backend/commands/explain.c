@@ -3402,6 +3402,10 @@ show_diamond_hashjoin_info(HashJoinState *hjstate, ExplainState *es)
 {
 	DiamondHashJoinInstrumentation *stats = hjstate->hj_DiamondStats;
 
+	/* Diamond-PG: show the latched execution choice, also in plain EXPLAIN. */
+	if (hjstate->hj_DiamondMatch)
+		ExplainPropertyBool("Diamond Lookup Expand", true, es);
+
 	if (!es->analyze || stats == NULL)
 		return;
 
