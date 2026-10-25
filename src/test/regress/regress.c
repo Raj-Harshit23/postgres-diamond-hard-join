@@ -30,15 +30,20 @@
 #include "common/pg_lzcompress.h"
 #include "executor/executor.h"
 #include "executor/functions.h"
+#include "executor/instrument.h"
 #include "executor/spi.h"
+#include "executor/tstoreReceiver.h"
 #include "foreign/foreign.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/supportnodes.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/readfuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "parser/parse_coerce.h"
+#include "parser/parsetree.h"
 #include "port/atomics.h"
 #include "portability/instr_time.h"
 #include "postmaster/postmaster.h"	/* for MAX_BACKENDS */
@@ -50,6 +55,8 @@
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
 #include "utils/typcache.h"
 
 /* define our text domain for translations */
@@ -63,6 +70,135 @@
 				 "%s was unexpectedly false in file \"%s\" line %u", \
 				 #expr, __FILE__, __LINE__); \
 	} while (0)
+
+/*
+ * Diamond-PG: regression-only remapping for a two-Lookup physical stack.
+ * The second Lookup originally saw Expand1's output.  Its keys must now
+ * address the original head; reject dependencies on the still-deferred build.
+ */
+static Node *
+diamond_test_head_key(Node *node, void *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = copyObject((Var *) node);
+
+		if (var->varno == OUTER_VAR)
+		{
+			TargetEntry *tle = get_tle_by_resno((List *) context, var->varattno);
+
+			if (!tle || !IsA(tle->expr, Var) ||
+				((Var *) tle->expr)->varno != OUTER_VAR)
+				elog(ERROR, "Diamond test Lookup key depends on a deferred relation");
+			var->varattno = ((Var *) tle->expr)->varattno;
+		}
+		return (Node *) var;
+	}
+	return expression_tree_mutator(node, diamond_test_head_key, context);
+}
+
+PG_FUNCTION_INFO_V1(test_diamond_deferred_plan);
+
+/*
+ * Diamond-PG: exercise private head transport without shipping a Phase 4
+ * scheduling policy.  Plan a read-only fixture, replace E2-L2-E1-L1 with
+ * E2-E1-L2-L1, remap only original-head keys, and execute real native nodes.
+ * Return the complete bag through PostgreSQL's materialized SRF receiver.
+ * Expected L2/E1 row counts prove rejection precedes S fanout.  expire=true
+ * deliberately invalidates a paused owner to test the generation guard.
+ * spill=true inflates only the build sizing estimate, deterministically
+ * exercising the deferred-head batch guard without changing join orientation.
+ */
+Datum
+test_diamond_deferred_plan(PG_FUNCTION_ARGS)
+{
+	char	   *query = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	List	   *raw = pg_parse_query(query);
+	List	   *queries;
+	List	   *plans;
+	PlannedStmt *stmt;
+	Expand	   *e2;
+	Expand	   *e1;
+	Lookup	   *l2;
+	Lookup	   *l1;
+	QueryDesc  *qd;
+	DestReceiver *dest;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	PlanState  *e1state;
+	PlanState  *l2state;
+
+	if (list_length(raw) != 1)
+		elog(ERROR, "Diamond test requires one SELECT");
+	queries = pg_analyze_and_rewrite_fixedparams(linitial_node(RawStmt, raw),
+												 query, NULL, 0, NULL);
+	plans = pg_plan_queries(queries, query, 0, NULL);
+	if (list_length(plans) != 1)
+		elog(ERROR, "Diamond test requires one SELECT plan");
+	stmt = linitial_node(PlannedStmt, plans);
+	if (stmt->commandType != CMD_SELECT || !IsA(stmt->planTree, Expand) ||
+		!IsA(outerPlan(stmt->planTree), Lookup))
+		elog(ERROR, "Diamond test requires two adjacent Lookup/Expand pairs");
+	e2 = (Expand *) stmt->planTree;
+	l2 = (Lookup *) outerPlan(e2);
+	if (!IsA(outerPlan(l2), Expand) || !IsA(outerPlan(outerPlan(l2)), Lookup))
+		elog(ERROR, "Diamond test requires two adjacent Lookup/Expand pairs");
+	e1 = (Expand *) outerPlan(l2);
+	l1 = (Lookup *) outerPlan(e1);
+	if (e1->join.joinqual != NIL || e1->join.plan.qual != NIL ||
+		e2->join.joinqual != NIL || e2->join.plan.qual != NIL)
+		elog(ERROR, "Diamond test stack requires pure equijoins");
+	l2->hashjoin.hashkeys = (List *) diamond_test_head_key(
+														   (Node *) l2->hashjoin.hashkeys, e1->join.plan.targetlist);
+	l2->hashjoin.hashclauses = (List *) diamond_test_head_key(
+															  (Node *) l2->hashjoin.hashclauses, e1->join.plan.targetlist);
+	l2->hashjoin.join.plan.targetlist = copyObject(l1->hashjoin.join.plan.targetlist);
+	l2->hashjoin.join.plan.plan_width = l1->hashjoin.join.plan.plan_width;
+	outerPlan(l2) = (Plan *) l1;
+	outerPlan(e1) = (Plan *) l2;
+	outerPlan(e2) = (Plan *) e1;
+	e1->final = false;
+	if (PG_GETARG_BOOL(4))
+		outerPlan(innerPlan(l2))->plan_rows = 1000000;
+
+	/*
+	 * No executor pointers exist yet: generated copying/serialization must
+	 * work.
+	 */
+	stmt = (PlannedStmt *) stringToNode(nodeToString(copyObject(stmt)));
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+	dest = CreateTuplestoreDestReceiver();
+	SetTuplestoreDestReceiverParams(dest, rsinfo->setResult,
+									rsinfo->econtext->ecxt_per_query_memory,
+									false, rsinfo->setDesc,
+									"Diamond test result descriptor mismatch");
+	qd = CreateQueryDesc(stmt, query, GetActiveSnapshot(), InvalidSnapshot,
+						 dest, NULL, NULL, INSTRUMENT_ROWS);
+	ExecutorStart(qd, 0);
+	e1state = outerPlanState(qd->planstate);
+	l2state = outerPlanState(e1state);
+	if (PG_GETARG_BOOL(3))
+	{
+		ExecutorRun(qd, ForwardScanDirection, 1);
+		ExecReScan(l2state);
+	}
+	ExecutorRun(qd, ForwardScanDirection, 0);
+	/* Rewind the complete stack, retaining only its second identical bag. */
+	ExecutorRewind(qd);
+	tuplestore_clear(rsinfo->setResult);
+	ExecutorRun(qd, ForwardScanDirection, 0);
+	ExecutorFinish(qd);
+	InstrEndLoop(l2state->instrument);
+	InstrEndLoop(e1state->instrument);
+	if (l2state->instrument->ntuples != 2 * PG_GETARG_INT64(1) ||
+		e1state->instrument->ntuples != 2 * PG_GETARG_INT64(2))
+		elog(ERROR, "Diamond test deferred operator row counts differ");
+	ExecutorEnd(qd);
+	FreeQueryDesc(qd);
+	dest->rDestroy(dest);
+	PG_RETURN_NULL();
+}
 
 #define EXPECT_EQ_U32(result_expr, expected_expr)	\
 	do { \

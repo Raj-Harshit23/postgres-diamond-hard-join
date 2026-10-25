@@ -1442,6 +1442,12 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			pname = "Hash";		/* "Join" gets added by jointype switch */
 			sname = "Hash Join";
 			break;
+		case T_Lookup:
+			pname = sname = "Diamond Lookup";
+			break;
+		case T_Expand:
+			pname = sname = "Diamond Expand";
+			break;
 		case T_SeqScan:
 			pname = sname = "Seq Scan";
 			break;
@@ -2186,6 +2192,21 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			show_upper_qual(((MergeJoin *) plan)->join.joinqual,
 							"Join Filter", planstate, ancestors, es);
 			if (((MergeJoin *) plan)->join.joinqual)
+				show_instrumentation_count("Rows Removed by Join Filter", 1,
+										   planstate, es);
+			show_upper_qual(plan->qual, "Filter", planstate, ancestors, es);
+			if (plan->qual)
+				show_instrumentation_count("Rows Removed by Filter", 2,
+										   planstate, es);
+			break;
+		case T_Lookup:
+			show_upper_qual(((Lookup *) plan)->hashjoin.hashclauses,
+							"Hash Cond", planstate, ancestors, es);
+			break;
+		case T_Expand:
+			show_upper_qual(((Expand *) plan)->join.joinqual,
+							"Join Filter", planstate, ancestors, es);
+			if (((Expand *) plan)->join.joinqual)
 				show_instrumentation_count("Rows Removed by Join Filter", 1,
 										   planstate, es);
 			show_upper_qual(plan->qual, "Filter", planstate, ancestors, es);

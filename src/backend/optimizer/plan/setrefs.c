@@ -1364,6 +1364,15 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	plan->lefttree = set_plan_refs(root, plan->lefttree, rtoffset);
 	plan->righttree = set_plan_refs(root, plan->righttree, rtoffset);
 
+	/*
+	 * Diamond-PG: decompose only after native references/Params and parallel
+	 * decisions are fixed.  The constructor preserves the chosen relational
+	 * output/parameter sets and gives the additional Lookup a unique node ID.
+	 * No independent Path search or join scheduling is introduced here.
+	 */
+	if (IsA(plan, HashJoin))
+		return create_diamond_lookup_expand(root, (HashJoin *) plan);
+
 	return plan;
 }
 

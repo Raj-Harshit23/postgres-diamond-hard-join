@@ -40,6 +40,8 @@ extern void preprocess_minmax_aggregates(PlannerInfo *root);
  * prototypes for plan/createplan.c
  */
 extern Plan *create_plan(PlannerInfo *root, Path *best_path);
+extern Plan *create_diamond_lookup_expand(PlannerInfo *root, HashJoin *join);
+extern Lookup *find_diamond_lookup_plan(Plan *head, int plan_node_id);
 extern ForeignScan *make_foreignscan(List *qptlist, List *qpqual,
 									 Index scanrelid, List *fdw_exprs, List *fdw_private,
 									 List *fdw_scan_tlist, List *fdw_recheck_quals,

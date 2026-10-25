@@ -89,6 +89,7 @@
 #include "executor/nodeGroup.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeLookupExpand.h"
 #include "executor/nodeIncrementalSort.h"
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
@@ -307,6 +308,13 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 		case T_HashJoin:
 			result = (PlanState *) ExecInitHashJoin((HashJoin *) node,
 													estate, eflags);
+			break;
+
+		case T_Lookup:
+			result = (PlanState *) ExecInitLookup((Lookup *) node, estate, eflags);
+			break;
+		case T_Expand:
+			result = (PlanState *) ExecInitExpand((Expand *) node, estate, eflags);
 			break;
 
 			/*
@@ -679,6 +687,12 @@ ExecEndNode(PlanState *node)
 		case T_HashJoinState:
 			ExecEndHashJoin((HashJoinState *) node);
 			break;
+		case T_LookupState:
+			ExecEndLookup((LookupState *) node);
+			break;
+		case T_ExpandState:
+			ExecEndExpand((ExpandState *) node);
+			break;
 
 			/*
 			 * materialization nodes
@@ -795,6 +809,7 @@ ExecShutdownNode_walker(PlanState *node, void *context)
 		case T_HashState:
 			ExecShutdownHash((HashState *) node);
 			break;
+		case T_LookupState:
 		case T_HashJoinState:
 			ExecShutdownHashJoin((HashJoinState *) node);
 			break;

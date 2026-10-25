@@ -32,6 +32,7 @@
 #include "executor/nodeGroup.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeLookupExpand.h"
 #include "executor/nodeIncrementalSort.h"
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
@@ -249,6 +250,12 @@ ExecReScan(PlanState *node)
 
 		case T_HashJoinState:
 			ExecReScanHashJoin((HashJoinState *) node);
+			break;
+		case T_LookupState:
+			ExecReScanLookup((LookupState *) node);
+			break;
+		case T_ExpandState:
+			ExecReScanExpand((ExpandState *) node);
 			break;
 
 		case T_MaterialState:

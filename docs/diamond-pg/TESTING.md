@@ -3,7 +3,8 @@
 Updated 2026-10-19. Baseline: PostgreSQL 20devel,
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
 Use the native build tools below. Staging or committing is **not** required
-before building/testing: both use the current working tree.
+before building/testing: both use the current working tree. Phase 2 is
+committed as `c169183521`; Phase 3 changes remain uncommitted for review.
 
 ## 1. System dependencies (Ubuntu 24.04)
 
@@ -38,9 +39,13 @@ export TMPDIR="$diamond_build/scratch"
 export PG_REGRESS_SOCK_DIR="$diamond_work/s"
 cd "$diamond_build"
 "$diamond_src/configure" --prefix="$diamond_install" \
-  --enable-cassert --enable-debug > configure.log 2>&1
+  --enable-cassert --enable-debug --enable-depend > configure.log 2>&1
 make -j4 > build.log 2>&1
 ```
+
+After introducing NodeTags or changing node layouts, run `make clean` in an
+existing build and reconfigure with `--enable-depend` before rebuilding. This
+is required to avoid stale objects interpreting shifted NodeTag numbers.
 
 Run the next command only if the previous one succeeded. Inspect a command's
 exit status with `echo $?`, and read its log on failure. The socket directory
@@ -72,7 +77,7 @@ Inspect `src/test/regress/regression.diffs`, `results/`, and `log/` under
 block before SQL execution, not a regression assertion failure. Run the same
 command from your normal terminal if sandbox execution is denied.
 
-To run the self-contained Diamond test (Phases 1 and 2) alone:
+To run the self-contained Diamond test (Phases 1–3) alone:
 
 ```sh
 make -C "$diamond_build/src/test/regress" check-tests \
@@ -92,7 +97,10 @@ residual call counts, unique build rows, NO SCROLL FETCH pause/resume,
 partial/rescanned expansion, parameterized/spilled rebuilds, skew and native
 fallback, including forced
 Gather. A raised query_canceled tests error unwinding; the real timeout test
-below verifies cancellation during live execution.
+below verifies cancellation during live execution. Phase 3 additionally checks
+actual Lookup/Expand row counts, stacked deferred heads with duplicate bags,
+whole-stack rewind, copy/read round trips, owner-rescan invalidation, internal
+spill rejection, and native DML/row-lock/subplan/parallel fallback.
 
 To repeat the formatting check, from the repository root with the
 same shell variables, build PostgreSQL's formatter and check the touched files:
@@ -101,13 +109,18 @@ same shell variables, build PostgreSQL's formatter and check the touched files:
 make -C "$diamond_build/src/tools/pg_bsd_indent"
 src/tools/pgindent/pgindent \
   --indent="$diamond_build/src/tools/pg_bsd_indent/pg_bsd_indent" \
-  --list-of-typedefs='DiamondHashJoinInstrumentation SharedDiamondHashJoinInfo DiamondHashMatch' \
+  --list-of-typedefs='DiamondHashJoinInstrumentation SharedDiamondHashJoinInfo DiamondHashMatch Lookup Expand LookupState ExpandState DiamondDeferredMatch' \
   --check src/backend/commands/explain.c src/backend/executor/execParallel.c \
   src/backend/executor/nodeHashjoin.c src/backend/executor/nodeHash.c \
   src/backend/utils/misc/guc_tables.c src/include/executor/hashjoin.h \
   src/include/executor/instrument_node.h src/include/executor/nodeHash.h \
   src/include/executor/nodeHashjoin.h \
-  src/include/nodes/execnodes.h
+  src/include/nodes/execnodes.h src/include/nodes/plannodes.h \
+  src/backend/executor/execAmi.c src/backend/executor/execProcnode.c \
+  src/backend/executor/nodeLookupExpand.c src/include/executor/nodeLookupExpand.h \
+  src/backend/optimizer/plan/createplan.c src/backend/optimizer/plan/setrefs.c \
+  src/include/optimizer/planmain.h src/backend/utils/adt/ruleutils.c \
+  src/test/regress/regress.c
 ```
 
 ## 4. Manual HashJoin traces
@@ -240,7 +253,7 @@ Each HashJoin should report 20,000 for all four Diamond counters. Actual worker
 availability depends on the server; the saved plans prove that two launched
 in the recorded run. ROLLBACK removes the fixture table.
 
-## 6. Phase 2 execution and real cancellation
+## 6. Lookup/Expand execution and real cancellation
 
 `SET diamond_lookup_expand=on` enables immediate Lookup/Expand independently
 of counter collection. It defaults off. Only eligible serial inner joins over
@@ -250,26 +263,41 @@ EXPLAIN reports `Diamond Lookup Expand: true` on selected nodes; check ANALYZE
 and Actual Loops to distinguish selection from actual execution. No independent
 scheduling or speedup is implied. ARCHITECTURE.md defines the lifetime contract.
 
+Phase 3: `SET diamond_independent_lookup_expand=on` before planning exposes
+separate Diamond Lookup/Expand nodes. It defaults off; cached plans retain
+the choice. Public plans close each pair; the private C regression fixture
+alone separates their scheduling. Actual Rows/Loops measure new nodes; the
+four Phase 1 counters continue to apply only to native HashJoin nodes.
+Unsupported inputs, DML/locking, subplans and parallel statements stay native.
+Nested deferred builds/general acyclic scheduling are not implemented.
+
 After building/installing, with section 2's shell variables, use the existing
 private cluster initialized in section 4; do not run initdb over it. The
 following is the recorded runtime check. The subshell stops its server even
-on failure; output plans are raw JSON and notices go to phase2-runtime.log.
+on failure; output plans are raw JSON. Use `diamond_phase=2` to repeat the
+immediate path or `diamond_phase=3` for separate nodes (the default below).
 
 ```sh
+diamond_phase=3
+diamond_lookup_guc=diamond_independent_lookup_expand
+if [ "$diamond_phase" = 2 ]; then diamond_lookup_guc=diamond_lookup_expand; fi
 (
 set -e
 export TMPDIR="$diamond_build/scratch"
 "$diamond_install/bin/pg_ctl" -D "$diamond_work/data" \
-  -l "$diamond_build/phase2-server.log" \
+  -l "$diamond_build/phase${diamond_phase}-server.log" \
   -o "-k $diamond_work/s -p 55432 -c listen_addresses=''" -w start
 trap '"$diamond_install/bin/pg_ctl" -D "$diamond_work/data" -w stop -m fast' EXIT
 "$diamond_install/bin/psql" -X -qAt -v ON_ERROR_STOP=1 \
   -h "$diamond_work/s" -p 55432 -d postgres \
-  -v cancel_plan="$diamond_build/phase2-cancel-plan.json" \
-  -v runtime_plan="$diamond_build/phase2-runtime-plan.json" \
-  > "$diamond_build/phase2-runtime.log" 2>&1 <<'SQL'
+  -v lookup_guc="$diamond_lookup_guc" \
+  -v cancel_plan="$diamond_build/phase${diamond_phase}-cancel-plan.json" \
+  -v runtime_plan="$diamond_build/phase${diamond_phase}-runtime-plan.json" \
+  > "$diamond_build/phase${diamond_phase}-runtime.log" 2>&1 <<'SQL'
 BEGIN;
-SET LOCAL diamond_lookup_expand=on;
+SET LOCAL diamond_lookup_expand=off;
+SET LOCAL diamond_independent_lookup_expand=off;
+SET LOCAL :lookup_guc=on;
 SET LOCAL diamond_hashjoin_stats=on;
 SET LOCAL max_parallel_workers_per_gather=0;
 SET LOCAL enable_nestloop=off;
@@ -277,51 +305,50 @@ SET LOCAL enable_mergejoin=off;
 SET LOCAL jit=off;
 SET LOCAL work_mem='64kB';
 SET LOCAL hash_mem_multiplier=1;
-CREATE TABLE diamond_phase2_runtime AS
+CREATE TABLE diamond_runtime AS
   SELECT i AS id, repeat('x',128) AS payload FROM generate_series(1,20000) i;
-ANALYZE diamond_phase2_runtime;
-CREATE FUNCTION diamond_phase2_delay(a int, b int) RETURNS boolean
+ANALYZE diamond_runtime;
+CREATE FUNCTION diamond_delay(a int, b int) RETURNS boolean
 LANGUAGE plpgsql VOLATILE AS $$
 BEGIN
-  RAISE NOTICE 'Phase 2 residual entered with a live match';
+  RAISE NOTICE 'Residual entered with a live match';
   PERFORM pg_sleep(2);
   RETURN a=b;
 END;
 $$;
 \o :cancel_plan
 EXPLAIN (COSTS OFF, FORMAT JSON)
-SELECT l.id FROM diamond_phase2_runtime l JOIN diamond_phase2_runtime r
-  ON l.id=r.id AND diamond_phase2_delay(l.id,r.id);
+SELECT l.id FROM diamond_runtime l JOIN diamond_runtime r
+  ON l.id=r.id AND diamond_delay(l.id,r.id);
 \o
 SET LOCAL statement_timeout='500ms';
 DO $$
 BEGIN
   BEGIN
-    PERFORM l.id FROM diamond_phase2_runtime l JOIN diamond_phase2_runtime r
-      ON l.id=r.id AND diamond_phase2_delay(l.id,r.id);
+    PERFORM l.id FROM diamond_runtime l JOIN diamond_runtime r
+      ON l.id=r.id AND diamond_delay(l.id,r.id);
     RAISE EXCEPTION 'expected statement timeout';
   EXCEPTION WHEN query_canceled THEN
-    RAISE NOTICE 'Phase 2 cancellation caught: %', SQLERRM;
+    RAISE NOTICE 'Cancellation caught: %', SQLERRM;
   END;
 END;
 $$;
 SET LOCAL statement_timeout=0;
 \o :runtime_plan
 EXPLAIN (ANALYZE,BUFFERS,COSTS OFF,TIMING OFF,FORMAT JSON)
-SELECT l.id,l.payload,r.payload FROM diamond_phase2_runtime l
-  JOIN diamond_phase2_runtime r USING(id);
+SELECT l.id,l.payload,r.payload FROM diamond_runtime l
+  JOIN diamond_runtime r USING(id);
 \o
 ROLLBACK;
 SQL
 )
-cat "$diamond_build/phase2-runtime.log"
+cat "$diamond_build/phase${diamond_phase}-runtime.log"
 ```
 
-Recorded result: the residual-entry notice precedes the actual statement-timeout
-notice; the subsequent join uses Lookup/Expand, 16 hash batches, and 20,000 for
-each of the four counters. Batch counts may vary with configuration/estimates;
-the fixture must still return exactly 20,000 matches. ROLLBACK removes the
-fixture/function. Both saved JSON plans show the execution-choice property.
+Phase 2 recorded result: the residual-entry notice preceded the real timeout;
+the following join used 16 batches with all four counters 20,000. Phase 3
+recorded the same real timeout followed by 20,000 Actual Rows at each new
+node, one loop each and 16 Hash batches. ROLLBACK removes the fixture/function. Both saved plans must show the selected mode.
 
 ## 7. Later functional validation and sanitizer attempt
 
@@ -331,8 +358,9 @@ classes must retain native behavior. Add lifecycle/materialization cases as
 new ownership is introduced; do not claim instrumentation proves deferred
 execution is correct.
 
-Phase 2 attempted a separate assertion/debug ASan build using the same system
-dependencies. From a normal terminal, with section 2's variables:
+Phases 2 and 3 attempted a separate assertion/debug ASan build using the same
+system dependencies. From a normal terminal, with section 2's variables (run
+`make clean` first if reusing an older build after node-layout changes):
 
 ```sh
 diamond_asan="$diamond_work/build-asan"
@@ -343,12 +371,12 @@ cd "$diamond_asan"
 export TMPDIR="$diamond_asan/scratch"
 export PG_REGRESS_SOCK_DIR="$diamond_work/s"
 "$diamond_src/configure" --prefix="$diamond_work/install-asan" \
-  --enable-cassert --enable-debug \
+  --enable-cassert --enable-debug --enable-depend \
   CFLAGS='-O1 -g -fsanitize=address -fno-omit-frame-pointer' \
   LDFLAGS='-fsanitize=address' > configure.log 2>&1
 make -j4 > build.log 2>&1
 make -C src/test/regress check-tests TESTS=diamond_hashjoin \
-  EXTRA_REGRESS_OPTS='--port=55433' > phase2-targeted.log 2>&1
+  EXTRA_REGRESS_OPTS='--port=55433' > phase3-targeted.log 2>&1
 )
 ```
 
@@ -356,12 +384,14 @@ Configuration/compilation passed. The test failed before SQL: initdb's
 `postgres -V` subprocess exits nonzero after LeakSanitizer reports 777 bytes
 in unchanged `save_ps_display_args` (process-title environment copying).
 Evidence: `build-asan/phase2-targeted.log` and
-`build-asan/tmp_install/log/initdb-template.log`, relative to diamond_work.
+`build-asan/phase2-initdb.log`, relative to diamond_work. Phase 3 repeated
+a clean ASan build and test with the same failure; its evidence is
+`build-asan/{phase3-build,phase3-targeted,phase3-initdb}.log`.
 The tracing sandbox also prevents LeakSanitizer's configure probe;
-configuration and the subsequent failed test attempt ran outside it. No sanitizer check was
-disabled, no suppression/configuration workaround was added, and no sanitizer
+configuration and the subsequent failed test attempt ran outside it. No
+sanitizer check was disabled, no suppression/configuration workaround was added, and no sanitizer
 test pass is claimed. This leaves sanitizer validation outstanding.
-Future new nodes also need round-trip checks from `src/backend/nodes/README`.
+Phase 3 includes round-trip checks from `src/backend/nodes/README`.
 
 Benchmarks are Phase 8: paper microbenchmarks, JOB and TPC-H. Record commit,
 query/data seed/scale, hardware/configuration, warmups/repetitions, latency,
@@ -378,10 +408,43 @@ No benchmark results or performance claim exist yet.
 - Manual runtime: private/shared hash each launched two workers; all four
   total counters were 20,000. Regression worker relaunch case counted 60,000
   probes/matches over three launches. Private server stopped after validation.
-- Phase 2: assertion/debug build, focused diamond_hashjoin and all 240 core
+- Phase 2 (`c169183521`): assertion/debug build, focused diamond_hashjoin and all 240 core
   tests passed. A live-match residual was interrupted by a real 500ms timeout;
   the subsequent 16-batch join produced 20,000 for all counters. Private server
   stopped. ASan compilation passed; its test was blocked before SQL as above.
+
+Phase 3 (2026-10-19) passed the assertion/debug build, focused Diamond test,
+and **all 240 core regressions**, including the representative join tests.
+The C fixture runs/rewinds a real separated stack: per run, L2 outputs 11
+heads, E1 outputs 33 pairs and E2 outputs the correct 66-row multiset.
+Rescanning a paused owner raises the intended stale-reference error; an
+internally forced multi-batch stack raises the intended pre-output rejection.
+All positive/differential boolean oracles are true. Public batching, skew,
+partial parameter rebuilds, forward FETCH, volatile residuals, native fallbacks
+and generated Plan copy/read checks pass. The exact section 6 command was
+executed from this document: live residual -> real timeout -> 20,000 rows at
+both separate nodes, one loop each, 16 batches; raw JSON parsed/checked and
+private server stopped. ASan compiled including the regression C module, but
+its test stopped before SQL as above. Meson/check-world/benchmarks were not run.
+
+| Executed command / step | Actual result | Evidence relative to diamond_build |
+| --- | --- | --- |
+| `make -C "$diamond_build" clean`, configure as section 2 with `--enable-depend`, `make -C "$diamond_build" -j4` | Clean assertion/debug rebuild passed; final incremental compile passed without reported warnings | `phase3-clean.log`, `phase3-configure.log`, `phase3-build.log` (latest incremental) |
+| `make -C "$diamond_build/src/test/regress" check-tests TESTS=diamond_hashjoin` | Focused test passed against reviewed expectations | `phase3-targeted.log` |
+| `make -C "$diamond_build" check` | All 240 core tests passed | `phase3-check.log`; latest native `src/test/regress/{results,log}` |
+| `make -C "$diamond_build" install` | Private-prefix installation passed | `phase3-install.log` |
+| pgindent `--check`, section 3 | Passed with all eight Diamond typedefs | `phase3-indent.log` (empty; exit status checked) |
+| Section 6 shell/psql block, `diamond_phase=3` | Real timeout/recovery passed; server stopped | `phase3-runtime.log`, `phase3-server.log`, `phase3-{cancel,runtime}-plan.json` |
+| ASan section 7, plus final `make -C "$diamond_work/build-asan/src/test/regress" regress.so` | Compile passed; regression initialization blocked by the 777-byte startup leak | `../build-asan/phase3-{clean,configure,build,targeted,initdb}.log` |
+
+Development evidence: `phase3-initdb-initial.log` records stale NodeTags in the
+old build without dependencies; a standard clean rebuild fixed that. The
+slot assertion excerpt/backtrace in `phase3-slot-initial.log` led to dynamic
+outer equality deformation for the owned MinimalTuple copy; assertions were
+preserved. `phase3-targeted-review.log` contains expected differences from the
+Phase 2 expectations before review, not a passing log. Output review also
+fixed the numeric JSON oracle and standard regression-library environment
+loading. No suppressions, disabled checks or dependency workarounds were used.
 
 Phase 2 used the same native commands below, with phase2 log filenames:
 
@@ -389,7 +452,7 @@ Phase 2 used the same native commands below, with phase2 log filenames:
 | --- | --- | --- |
 | `make -C "$diamond_build" -j4` | Assertion/debug build passed without reported compiler warnings | `phase2-build.log` |
 | `make -C "$diamond_build/src/test/regress" check-tests TESTS=diamond_hashjoin` | Focused test passed against reviewed expectations | `phase2-targeted.log` |
-| `make -C "$diamond_build" check` | All 240 core tests passed | `phase2-check.log`; `src/test/regress/results/diamond_hashjoin.out` |
+| `make -C "$diamond_build" check` | All 240 core tests passed | `phase2-check.log`; `c169183521:src/test/regress/expected/diamond_hashjoin.out` |
 | `make -C "$diamond_build" install` | Private-prefix installation passed | `phase2-install.log` |
 | pgindent `--check`, section 3 | Passed on touched C/headers with the three Diamond typedefs | `phase2-indent.log` (empty on success; exit status checked) |
 | pg_ctl / psql / SQL in section 6 | Real timeout and recovery passed; server stopped | `phase2-runtime.log`, `phase2-server.log`, `phase2-{cancel,runtime}-plan.json` |

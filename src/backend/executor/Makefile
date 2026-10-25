@@ -52,6 +52,7 @@ OBJS = \
 	nodeIndexscan.o \
 	nodeLimit.o \
 	nodeLockRows.o \
+	nodeLookupExpand.o \
 	nodeMaterial.o \
 	nodeMemoize.o \
 	nodeMergeAppend.o \

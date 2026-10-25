@@ -10,8 +10,8 @@ map and design explanation; EXECPLAN.md is the session continuation guide.
 | --- | --- | --- |
 | 0: repository/paper mapping | Complete; system-package build, 239 regressions and runtime fixtures passed | Native planner/executor traces, paper mapping, invariants, tests, next-phase proposal; no functional changes |
 | 1: native instrumentation | Complete; build, all 240 regressions and two-worker runtime checks passed | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
-| 2: match representation | Complete, uncommitted; assertion/debug build, targeted test, 240 core tests and timeout/recovery passed; sanitizer execution blocked before SQL | First-match cursor with immediate Expand inside eligible serial inner HashJoins; native alternatives/fallback preserved |
-| 3: first-class operations | Not started | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
+| 2: match representation | Complete, committed as c169183521; build, focused/240 tests and timeout/recovery passed; sanitizer execution blocked before SQL | First-match cursor with immediate Expand inside eligible serial inner HashJoins; native alternatives/fallback preserved |
+| 3: first-class operations | Bounded independent nodes validated; uncommitted; nested deferred builds outstanding | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
 | 4: acyclic plans | Not started | Eligible alpha-acyclic inner-equijoin regions; legal paper-derived scheduling; native alternatives retained |
 | 5: cost and selection | Not started | Cost-based competition plus optional experimental controls; eligible does not mean forced |
 | 6: Expand3 | Not started | Correct three-relation cyclic equijoin using smaller-set iteration and secondary hashing |
@@ -101,26 +101,29 @@ test could not initialize because LeakSanitizer reports unchanged PostgreSQL
 startup allocations during `postgres -V`. No sanitizer test pass is claimed.
 Exact commands/results and evidence are recorded in TESTING.md.
 
-Suggested commit: `diamond-pg: add immediate hash lookup and expand`.
+Committed as `c169183521`: `diamond-pg: add immediate hash lookup and expand`.
 
 ## Phase 3: independently represented execution
 
-Compare native Plan/PlanState nodes and internal payload protocols before
-choosing one. Scope: `include/nodes/{plannodes.h,execnodes.h}`,
-`backend/executor` new Lookup/Expand nodes and headers,
-`execProcnode.c`, `execAmi.c`, `execParallel.c`,
-`backend/commands/explain.c`,
-`backend/optimizer/plan/{createplan.c,setrefs.c,subselect.c}`,
-`backend/nodes/nodeFuncs.c`, and generated-support source annotations.
-Audit comparable node references for additional required cases.
+Implemented separate serializable Lookup/Expand Plans and execution states.
+The typed sidecar contract owns probe copies and validates query-owned owner
+generations before accessing borrowed hash batches. Lookup can feed another
+Lookup without expanding the first relation; Expand uses private cursor copies
+to preserve multiplicity when another relation replicates the head.
 
-Specify owner, MemoryContext, batch/table identity, invalidation generation,
-probe/key copy rules, nested descriptor layout, rescan, parameter changes,
-early shutdown, and materialization/serialization boundaries. Allow a
-Lookup result through another Lookup without expanding its build payload.
-Avoid exposing pointer-valued handles to arbitrary native nodes. Explicit
-parallel/spill/parameter fallback restrictions are acceptable only when
-correctly enforced and documented.
+Opt-in production integration decomposes already chosen eligible HashJoins into
+adjacent pairs after native reference fixing. It adds no Paths or scheduling
+policy. Native initialization/build/batching is shared, not duplicated. Node
+copy/read, dispatch, deparse, parameter sets, rescans, shutdown and parallel
+boundaries are integrated. See ARCHITECTURE.md for structures/functions and
+TESTING.md for actual checks.
+
+Limits: only typed direct chains can carry sidecars; ordinary boundaries must
+be fully expanded. Production build inputs are direct heap scans. An internal
+deferred stack rejects batch spill before output. Nested deferred build payload
+storage remains outstanding; this milestone does not enable general chain/GYO
+plans. Resolve that contract before Phase 4's chain/nested-build acceptance.
+Phase 4 remains unauthorized.
 
 ## Phase 4: alpha-acyclic scheduling
 
@@ -201,10 +204,10 @@ paper's absolute-number reproduction on different hardware/configuration.
 
 ## Decisions still requiring design review
 
-1. Generalize the immediate cursor's borrowed slots into independently owned
-   deferred heads/keys; eager arrays were rejected for Phase 2.
-2. Internal payload/slot protocol, nested Lookup build storage, and safe
-   treatment of Material/Sort/Gather/spill and parameterized execution.
+1. Nested Lookup build storage and ownership across build materialization;
+   probe-head transport is implemented, not nested build transport.
+2. Deferred spill handling beyond the enforced single-batch stack restriction;
+   fully expanded boundaries currently protect ordinary native consumers.
 3. L&E optimizer state identity and path-pruning equivalence classes;
    initial search scope and planning-time bound.
 4. Runtime batching/fallback strategy: estimates cannot guarantee no spill,

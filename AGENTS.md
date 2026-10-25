@@ -39,9 +39,12 @@ persistent project directory. Do not use /tmp dependency/build workarounds.
 
 Phase 1 native HashJoin instrumentation and validation are complete and
 committed as `14ac927a8b`, following the Phase 0 commit `7756e8e52e`.
-Phase 2 first-match representation with immediate Lookup/Expand is implemented
-and validated in the uncommitted working tree; TESTING.md records evidence and
-the sanitizer limitation. Do not advance to Phase 3 without user direction.
+Phase 2 immediate Lookup/Expand is committed as `c169183521`; TESTING.md
+records validation and the sanitizer limitation. The user has authorized
+Phase 3: independently represented execution and its ownership contract.
+Its bounded independent-node milestone is implemented/validated and remains
+uncommitted for review; nested deferred build storage is still outstanding.
+Do not advance to Phase 4 without user direction.
 
 Before substantial work, read:
 

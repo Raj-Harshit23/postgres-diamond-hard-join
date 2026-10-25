@@ -2247,6 +2247,39 @@ typedef struct HashJoinState
 	struct DiamondHashMatch *hj_DiamondMatch;
 } HashJoinState;
 
+/*
+ * Diamond-PG: Lookup reuses native hash state, owns a copied per-head probe,
+ * and publishes typed immutable deferred matches.  Sidecar List cells and
+ * records live in head_context; owners/generations remain query-owned.
+ */
+typedef struct LookupState
+{
+	HashJoinState hashjoin;
+	MemoryContext head_context;
+	uint64		generation;
+	List	   *deferred;
+	bool		has_deferred_input;
+} LookupState;
+
+/*
+ * Diamond-PG: Expand owns its iterator copy and output sidecar, while input
+ * heads and hash tuples are borrowed until the next child pull.  Generation
+ * checks precede access to those borrowed values; they are never SQL Datums.
+ */
+typedef struct ExpandState
+{
+	PlanState	ps;
+	ExprState  *joinqual;
+	LookupState *owner;
+	uint64		owner_generation;
+	struct DiamondHashMatch *cursor;
+	TupleTableSlot *input_head;
+	TupleTableSlot *match_slot;
+	MemoryContext head_context;
+	List	   *deferred;
+	bool		have_head;
+} ExpandState;
+
 
 /* ----------------------------------------------------------------
  *				 Materialization State Information

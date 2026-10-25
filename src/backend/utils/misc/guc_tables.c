@@ -51,6 +51,7 @@
 #include "common/file_utils.h"
 #include "common/scram-common.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeLookupExpand.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
 #include "libpq/libpq.h"

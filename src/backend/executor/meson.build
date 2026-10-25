@@ -40,6 +40,7 @@ backend_sources += files(
   'nodeIndexscan.c',
   'nodeLimit.c',
   'nodeLockRows.c',
+  'nodeLookupExpand.c',
   'nodeMaterial.c',
   'nodeMemoize.c',
   'nodeMergeAppend.c',

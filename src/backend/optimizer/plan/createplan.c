@@ -17,8 +17,11 @@
 #include "postgres.h"
 
 #include "access/sysattr.h"
+#include "access/parallel.h"
 #include "access/transam.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_am_d.h"
+#include "executor/nodeLookupExpand.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
@@ -4376,6 +4379,141 @@ create_nestloop_plan(PlannerInfo *root,
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
 
 	return join_plan;
+}
+
+/*
+ * Diamond-PG: locate a deferred owner through typed head producers only.
+ * Expand's INNER_VAR deparsing uses that Lookup's actual Hash input, not a
+ * duplicated Plan subtree or a runtime pointer stored in the plan.
+ */
+Lookup *
+find_diamond_lookup_plan(Plan *head, int plan_node_id)
+{
+	while (head && (IsA(head, Lookup) || IsA(head, Expand)))
+	{
+		if (IsA(head, Lookup) && head->plan_node_id == plan_node_id)
+			return (Lookup *) head;
+		head = outerPlan(head);
+	}
+	return NULL;
+}
+
+/* Follow fixed slot Vars back to a real column, rejecting computed keys. */
+static bool
+diamond_simple_column(Plan *input, AttrNumber attno)
+{
+	TargetEntry *tle;
+	Var		   *var;
+
+	check_stack_depth();
+	tle = get_tle_by_resno(input->targetlist, attno);
+	if (!tle || !IsA(tle->expr, Var))
+		return false;
+	var = (Var *) tle->expr;
+	if (var->varattno <= 0)
+		return false;
+	if (IsA(input, SeqScan))
+		return true;
+	if ((IsA(input, Lookup) || IsA(input, Hash) || IsA(input, Expand)) &&
+		var->varno == OUTER_VAR)
+		return diamond_simple_column(outerPlan(input), var->varattno);
+	if (IsA(input, Expand) && var->varno == INNER_VAR)
+	{
+		Lookup	   *owner = find_diamond_lookup_plan(outerPlan(input),
+													 ((Expand *) input)->lookup_plan_id);
+
+		return owner && diamond_simple_column(innerPlan(owner), var->varattno);
+	}
+	return false;
+}
+
+/*
+ * Diamond-PG: physical decomposition of a chosen, reference-fixed HashJoin.
+ * Preserve its output/quals/Params in Expand and its native build/probe inputs
+ * in Lookup.  This opt-in constructor neither searches nor compares new Paths.
+ * Eligibility is conservative: serial inner joins, heap inputs, simple strict
+ * keys, no row locking/subplans/modification.  A fully expanded child pair may
+ * feed the next pair; unexpanded heads never enter ordinary native nodes.
+ */
+Plan *
+create_diamond_lookup_expand(PlannerInfo *root, HashJoin *join)
+{
+	Hash	   *hash = castNode(Hash, innerPlan(join));
+	Plan	   *inputs[2] = {outerPlan(join), outerPlan(hash)};
+	List	   *keys[2] = {join->hashkeys, hash->hashkeys};
+	Lookup	   *lookup;
+	Expand	   *expand;
+	List	   *head_tlist = NIL;
+	ListCell   *lc;
+	int			i;
+	PlannerInfo *top = root;
+
+	/* A SELECT subquery inside DML must obey the whole-statement gate too. */
+	while (top->parent_root)
+		top = top->parent_root;
+
+	if (!diamond_independent_lookup_expand || root->glob->parallelModeNeeded ||
+		IsParallelWorker() || top->parse->commandType != CMD_SELECT ||
+		top->parse->hasModifyingCTE || root->parse->rowMarks != NIL ||
+		root->glob->finalrowmarks != NIL || root->glob->subplans != NIL ||
+		join->join.jointype != JOIN_INNER || join->join.plan.parallel_aware)
+		return (Plan *) join;
+	foreach(lc, join->hashoperators)
+		if (!op_strict(lfirst_oid(lc)))
+		return (Plan *) join;
+	for (i = 0; i < 2; i++)
+	{
+		if (inputs[i]->parallel_aware)
+			return (Plan *) join;
+		if (IsA(inputs[i], SeqScan))
+		{
+			RangeTblEntry *rte = rt_fetch(((SeqScan *) inputs[i])->scan.scanrelid,
+										  root->glob->finalrtable);
+
+			if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
+				get_rel_relam(rte->relid) != HEAP_TABLE_AM_OID)
+				return (Plan *) join;
+		}
+		else if (i != 0 || !IsA(inputs[i], Expand) || !((Expand *) inputs[i])->final)
+			return (Plan *) join;
+		foreach(lc, keys[i])
+		{
+			Var		   *key = lfirst(lc);
+
+			if (!IsA(key, Var) || key->varattno <= 0 ||
+				!diamond_simple_column(inputs[i], key->varattno))
+				return (Plan *) join;
+		}
+	}
+
+	lookup = makeNode(Lookup);
+	lookup->hashjoin = *join;
+	NodeSetTag(lookup, T_Lookup);
+	lookup->hashjoin.join.joinqual = NIL;
+	lookup->hashjoin.join.plan.qual = NIL;
+	lookup->hashjoin.join.plan.initPlan = NIL;
+	lookup->hashjoin.join.plan.plan_node_id = ++root->glob->lastPlanNodeId;
+	lookup->hashjoin.join.plan.parallel_safe = false;
+	foreach(lc, inputs[0]->targetlist)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		TargetEntry *head = copyObject(tle);
+
+		head->expr = (Expr *) makeVarFromTargetEntry(OUTER_VAR, tle);
+		head_tlist = lappend(head_tlist, head);
+	}
+	lookup->hashjoin.join.plan.targetlist = head_tlist;
+	lookup->hashjoin.join.plan.plan_rows = inputs[0]->plan_rows;
+	lookup->hashjoin.join.plan.plan_width = inputs[0]->plan_width;
+	expand = makeNode(Expand);
+	expand->join = join->join;
+	NodeSetTag(expand, T_Expand);
+	expand->join.plan.parallel_safe = false;
+	outerPlan(expand) = (Plan *) lookup;
+	innerPlan(expand) = NULL;
+	expand->lookup_plan_id = lookup->hashjoin.join.plan.plan_node_id;
+	expand->final = true;
+	return (Plan *) expand;
 }
 
 static MergeJoin *

@@ -232,9 +232,9 @@ static bool ExecHashJoinCanLookupExpand(HashJoinState *hjstate);
  * ----------------------------------------------------------------
  */
 static pg_always_inline TupleTableSlot *
-ExecHashJoinImpl(PlanState *pstate, bool parallel)
+ExecHashJoinImpl(PlanState *pstate, bool parallel, bool lookup_only)
 {
-	HashJoinState *node = castNode(HashJoinState, pstate);
+	HashJoinState *node = (HashJoinState *) pstate;
 	PlanState  *outerNode;
 	HashState  *hashNode;
 	ExprState  *joinqual;
@@ -245,6 +245,8 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 	uint32		hashvalue;
 	int			batchno;
 	ParallelHashJoinState *parallel_state;
+
+	Assert(lookup_only ? IsA(pstate, LookupState) : IsA(pstate, HashJoinState));
 
 	/*
 	 * get information from HashJoin node
@@ -390,6 +392,20 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * began scanning the outer relation
 				 */
 				hashtable->nbatch_outstart = hashtable->nbatch;
+
+				/*
+				 * Diamond-PG: native batch files store SQL tuples, not
+				 * sidecars. Production decomposition receives fully expanded
+				 * inputs and supports native batching.  A manually assembled
+				 * deferred-head stack must keep its owning tables resident;
+				 * reject a spilling physical stack before it can expose any
+				 * result.
+				 */
+				if (lookup_only && ((LookupState *) node)->has_deferred_input &&
+					hashtable->nbatch != 1)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("deferred Lookup input cannot cross hash batches")));
 
 				/*
 				 * Reset OuterNotEmpty for scan.  (It's OK if we fetched a
@@ -568,6 +584,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					Assert(!parallel);
 					if (!ExecHashLookup(node->hj_DiamondMatch, node, econtext))
 						continue;
+					if (lookup_only)
+					{
+						/*
+						 * Diamond-PG: publish a shrinking head, not a joined
+						 * row.  Its consumer owns enumeration; the next pull
+						 * requests a new probe only after that head is
+						 * drained.
+						 */
+						node->hj_JoinState = HJ_NEED_NEW_OUTER;
+						return econtext->ecxt_outertuple;
+					}
 				}
 
 				/* OK, let's scan the bucket for matches */
@@ -877,7 +904,7 @@ ExecHashJoin(PlanState *pstate)
 	 * On sufficiently smart compilers this should be inlined with the
 	 * parallel-aware branches removed.
 	 */
-	return ExecHashJoinImpl(pstate, false);
+	return ExecHashJoinImpl(pstate, false, false);
 }
 
 /* ----------------------------------------------------------------
@@ -893,7 +920,19 @@ ExecParallelHashJoin(PlanState *pstate)
 	 * On sufficiently smart compilers this should be inlined with the
 	 * parallel-oblivious branches removed.
 	 */
-	return ExecHashJoinImpl(pstate, true);
+	return ExecHashJoinImpl(pstate, true, false);
+}
+
+/*
+ * Diamond-PG: run native private hash build/batching/probe admission until one
+ * first equality match is found.  Return the borrowed probe or NULL at EOF;
+ * ExecLookup copies it before exposing the head to another operator.  The
+ * constant mode lets native HashJoin retain its specialized compilation.
+ */
+TupleTableSlot *
+ExecHashJoinFirstMatch(PlanState *pstate)
+{
+	return ExecHashJoinImpl(pstate, false, true);
 }
 
 /* ----------------------------------------------------------------
@@ -905,12 +944,29 @@ ExecParallelHashJoin(PlanState *pstate)
 HashJoinState *
 ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 {
-	HashJoinState *hjstate;
+	HashJoinState *hjstate = makeNode(HashJoinState);
+
+	ExecInitHashJoinState(node, estate, eflags, hjstate);
+	return hjstate;
+}
+
+/*
+ * Diamond-PG: initialize the shared hash-build/probe state in a caller-owned
+ * HashJoinState or its LookupState subclass.  Lookup supplies a head-only
+ * result descriptor and does its own copying, rather than compile a join
+ * projection.  All native hash expressions, slots and lifecycle state remain
+ * initialized here once, with the same ownership as native HashJoin.
+ */
+void
+ExecInitHashJoinState(HashJoin *node, EState *estate, int eflags,
+					  HashJoinState *hjstate)
+{
 	Plan	   *outerNode;
 	Hash	   *hashNode;
 	TupleDesc	outerDesc,
 				innerDesc;
 	const TupleTableSlotOps *ops;
+	bool		lookup_only = IsA(hjstate, LookupState);
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -918,7 +974,6 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	/*
 	 * create state structure
 	 */
-	hjstate = makeNode(HashJoinState);
 	hjstate->js.ps.plan = (Plan *) node;
 	hjstate->js.ps.state = estate;
 
@@ -927,7 +982,7 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	 * ExecInitNode has not installed ps.instrument yet, so use es_instrument.
 	 * The disabled path allocates no counters and retains native tuple flow.
 	 */
-	if (diamond_hashjoin_stats && estate->es_instrument)
+	if (!lookup_only && diamond_hashjoin_stats && estate->es_instrument)
 		hjstate->hj_DiamondStats =
 			palloc0_object(DiamondHashJoinInstrumentation);
 
@@ -964,8 +1019,10 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	/*
 	 * Initialize result slot, type and projection.
 	 */
-	ExecInitResultTupleSlotTL(&hjstate->js.ps, &TTSOpsVirtual);
-	ExecAssignProjectionInfo(&hjstate->js.ps, NULL);
+	ExecInitResultTupleSlotTL(&hjstate->js.ps,
+							  lookup_only ? &TTSOpsMinimalTuple : &TTSOpsVirtual);
+	if (!lookup_only)
+		ExecAssignProjectionInfo(&hjstate->js.ps, NULL);
 
 	/*
 	 * tuple table initialization
@@ -1111,6 +1168,19 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 		ExecInitQual(node->join.plan.qual, (PlanState *) hjstate);
 	hjstate->js.joinqual =
 		ExecInitQual(node->join.joinqual, (PlanState *) hjstate);
+
+	/*
+	 * Diamond-PG: first-match equality sees the native child slot, while
+	 * independent Expand sees an owned MinimalTuple copy of that same probe.
+	 * Their descriptors agree, but slot operations can differ (buffer/virtual
+	 * versus minimal).  Compile equality with dynamic outer deformation; the
+	 * admission hash expression above remains specialized to the child.
+	 */
+	if (lookup_only)
+	{
+		hjstate->js.ps.outeropsset = true;
+		hjstate->js.ps.outeropsfixed = false;
+	}
 	hjstate->hashclauses =
 		ExecInitQual(node->hashclauses, (PlanState *) hjstate);
 
@@ -1131,10 +1201,8 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 	hjstate->hj_OuterNotEmpty = false;
 
 	/* Diamond-PG: latch eligibility once; no allocation on native fallback. */
-	if (diamond_lookup_expand && ExecHashJoinCanLookupExpand(hjstate))
+	if (!lookup_only && diamond_lookup_expand && ExecHashJoinCanLookupExpand(hjstate))
 		hjstate->hj_DiamondMatch = palloc0_object(DiamondHashMatch);
-
-	return hjstate;
 }
 
 /*

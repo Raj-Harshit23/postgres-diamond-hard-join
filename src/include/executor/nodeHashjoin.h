@@ -22,6 +22,9 @@ extern PGDLLIMPORT bool diamond_hashjoin_stats;
 extern PGDLLIMPORT bool diamond_lookup_expand;
 
 extern HashJoinState *ExecInitHashJoin(HashJoin *node, EState *estate, int eflags);
+extern void ExecInitHashJoinState(HashJoin *node, EState *estate, int eflags,
+								  HashJoinState *state);
+extern TupleTableSlot *ExecHashJoinFirstMatch(PlanState *state);
 extern void ExecEndHashJoin(HashJoinState *node);
 extern void ExecReScanHashJoin(HashJoinState *node);
 extern void ExecShutdownHashJoin(HashJoinState *node);

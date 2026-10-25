@@ -48,6 +48,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/planmain.h"
 #include "parser/parse_agg.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
@@ -5207,6 +5208,16 @@ set_deparse_plan(deparse_namespace *dpns, Plan *plan)
 			dpns->inner_plan = outerPlan(plan);
 		else
 			dpns->inner_plan = plan;
+	}
+	else if (IsA(plan, Expand))
+	{
+		/* Diamond-PG: INNER_VAR belongs to the deferred Lookup's build. */
+		Lookup	   *owner = find_diamond_lookup_plan(outerPlan(plan),
+													 ((Expand *) plan)->lookup_plan_id);
+
+		if (!owner)
+			elog(ERROR, "missing Diamond Lookup for deparsing");
+		dpns->inner_plan = innerPlan(owner);
 	}
 	else
 		dpns->inner_plan = innerPlan(plan);

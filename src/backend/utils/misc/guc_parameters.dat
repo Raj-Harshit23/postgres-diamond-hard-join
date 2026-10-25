@@ -818,6 +818,13 @@
   boot_val => 'false',
 },
 
+{ name => 'diamond_independent_lookup_expand', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Decomposes eligible chosen hash joins into independent Lookup and Expand nodes.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'diamond_independent_lookup_expand',
+  boot_val => 'false',
+},
+
 { name => 'diamond_lookup_expand', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Enables experimental immediate Lookup/Expand for eligible serial hash joins.',
   flags => 'GUC_NOT_IN_SAMPLE',

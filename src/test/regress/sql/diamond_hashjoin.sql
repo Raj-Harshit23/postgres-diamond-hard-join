@@ -25,7 +25,8 @@ begin
       select child from nodes,
         lateral jsonb_array_elements(node->'Plans') child
     )
-    select node from nodes where node->>'Node Type' = 'Hash Join';
+    select node from nodes where node->>'Node Type' in
+      ('Hash Join', 'Diamond Lookup', 'Diamond Expand');
 end;
 $$;
 
@@ -172,17 +173,24 @@ $$;
 -- Phase 2: execute each deterministic query off/on, compare bags in both
 -- directions, and require exactly the expected number of eligible joins.
 -- EXPLAIN ANALYZE CTAS exercises real enumeration and records its choice.
-create function diamond_same_rows(query text, expected_joins int default 1)
+create function diamond_same_rows(query text, expected_joins int default 1,
+                                  independent boolean default false)
 returns boolean language plpgsql as $$
 declare
   enabled_joins int;
+  lookups int;
   same_rows boolean;
 begin
   perform set_config('diamond_lookup_expand', 'off', true);
+  perform set_config('diamond_independent_lookup_expand', 'off', true);
   execute 'create table native_rows as ' || query;
-  perform set_config('diamond_lookup_expand', 'on', true);
-  select count(*) filter (where p->>'Diamond Lookup Expand' = 'true')
-    into enabled_joins
+  perform set_config('diamond_lookup_expand', (not independent)::text, true);
+  perform set_config('diamond_independent_lookup_expand', independent::text, true);
+  select count(*) filter (where case when independent then
+           p->>'Node Type' = 'Diamond Expand' else
+           p->>'Diamond Lookup Expand' = 'true' end),
+         count(*) filter (where p->>'Node Type' = 'Diamond Lookup')
+    into enabled_joins, lookups
     from diamond_plan('create table diamond_rows as ' || query) p;
   select not exists (
     (table native_rows except all table diamond_rows)
@@ -190,7 +198,8 @@ begin
     (table diamond_rows except all table native_rows)
   ) into same_rows;
   drop table native_rows, diamond_rows;
-  return same_rows and enabled_joins = expected_joins;
+  return same_rows and enabled_joins = expected_joins and
+         (not independent or lookups = expected_joins);
 end;
 $$;
 
@@ -401,4 +410,129 @@ from diamond_plan($q$
     on o.id<j.id+1 and o.id>j.id-1
 $q$) p;
 
+-- Phase 3: real plan/state nodes, preserving the same native bags.  The
+-- existing comparator switches the two opt-in modes independently.
+set local max_parallel_workers_per_gather = 0;
+show diamond_independent_lookup_expand;
+select label, diamond_same_rows(query, expected_pairs, true) as independent_bag
+from (values
+  ('duplicates', 'select r.k,s.k as sk,r.x+1 as x from probe r join build s on r.k=s.k', 1),
+  ('residual', 'select r.id,s.id as sid from probe r join build s on r.k=s.k and r.x<s.v', 1),
+  ('reject all', 'select r.id,s.id as sid from probe r join build s on r.k=s.k and r.x<s.v-100', 1),
+  ('empty', 'select r.id from probe r join empty_build s on r.k=s.k', 1),
+  ('no match', 'select r.id,s.id as sid from probe r join build s on r.k=s.id', 1),
+  ('limit', 'select r.k,s.k as sk from probe r join build s on r.k=s.k limit 1', 1),
+  ('text keys', 'select r.payload,s.payload as sp from text_probe r join text_build s using(k,n)', 1),
+  ('collision', 'select r.k,s.k as sk from collisions r join collisions s using(k)', 1),
+  ('unique', 'select r.id from probe r join unique_build s using(k)', 1),
+  ('subplan fallback', 'select r.id,s.id as sid,(select max(x) from probe) as m from probe r join build s on r.k=s.k', 0),
+  ('expression fallback', 'select r.id,s.id as sid from probe r join build s on r.k=s.k+1', 0),
+  ('outer fallback', 'select r.id,s.id as sid from probe r full join build s on r.k=s.k', 0),
+  ('semi fallback', 'select r.id from probe r where exists (select from build s where r.k=s.k)', 0),
+  ('anti fallback', 'select r.id from probe r where not exists (select from build s where r.k=s.k)', 0)
+) cases(label, query, expected_pairs);
+select p->>'Node Type' as operator,
+       case when p->>'Node Type' = 'Diamond Expand' then
+         (p->>'Actual Rows')::numeric = 3 else
+         (p->>'Actual Rows')::numeric =
+           case when p#>>'{Plans,0,Alias}' = 'r' then 2 else 3 end
+       end as correct_rows
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k') p;
+select diamond_same_rows('select r.id,s.id as sid from probe r join build s on r.k=s.k and count_residual(r.x,s.v)', 1, true) as independent_volatile;
+select last_value=12 as volatile_once_off_and_on from residual_calls;
+select diamond_same_rows('select l.id,l.payload,r.payload as rp from batch_data l join batch_data r using(id)', 1, true) as independent_batches;
+select diamond_same_rows('select l.id,l.payload,r.payload as rp from skew_probe l join batch_data r using(id)', 1, true) as independent_skew;
+select diamond_same_rows($q$
+  select o.n,j.* from (values (0),(10),(20)) o(n)
+  cross join lateral (
+    select r.id,s.id as sid from probe r join build s on r.k=s.k
+    where s.v>o.n limit 1
+  ) j
+$q$, 1, true) as independent_partial_rebuild;
+declare independent_forward no scroll cursor for
+  select r.k,s.k as sk from probe r join build s on r.k=s.k;
+fetch 1 from independent_forward;
+fetch 1 from independent_forward;
+fetch all from independent_forward;
+close independent_forward;
+
+-- Exercise generated copy/read support and EXPLAIN's deferred INNER_VAR map.
+set local debug_copy_parse_plan_trees = on;
+set local debug_write_read_parse_plan_trees = on;
+select diamond_same_rows('select r.x,s.v from probe r join build s on r.k=s.k and r.x<s.v', 1, true) as plan_roundtrip;
+set local debug_copy_parse_plan_trees = off;
+set local debug_write_read_parse_plan_trees = off;
+
+-- Both parallel hash flavors and forced Gather retain native plans.
+set local max_parallel_workers_per_gather = 2;
+set local enable_parallel_hash = off;
+select bool_and(p->>'Node Type' = 'Hash Join') as independent_private_fallback
+from diamond_plan('select count(*) from batch_data l join batch_data r using(id)') p;
+set local enable_parallel_hash = on;
+select bool_and(p->>'Node Type' = 'Hash Join') as independent_shared_fallback
+from diamond_plan('select count(*) from batch_data l join batch_data r using(id)') p;
+set local debug_parallel_query = on;
+select bool_and(p->>'Node Type' = 'Hash Join') as independent_forced_fallback
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k') p;
+set local debug_parallel_query = off;
+set local max_parallel_workers_per_gather = 0;
+
+-- The existing C regression module assembles a physical stack, not a query
+-- rewrite or shipping optimizer rule.  L2 returns 11 heads before E1 emits
+-- 33 S pairs; E2 then emits 66 rows with T's duplicate multiplicities.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set regresslib :libdir '/regress' :dlsuffix
+create function test_deferred(query text, heads bigint, expanded bigint,
+                             expire boolean default false,
+                             spill boolean default false)
+returns setof record as :'regresslib', 'test_diamond_deferred_plan'
+language c strict;
+select bool_and(p->>'Node Type' = 'Hash Join') as independent_lock_fallback
+from diamond_plan('select r.id,s.id from probe r join build s on r.k=s.k for update of r') p;
+select bool_and(p->>'Node Type' = 'Hash Join') as independent_update_fallback
+from diamond_plan('update probe r set x=r.x from build s where r.k=s.k') p;
+create table stack_head as select i as a,i as b from generate_series(1,200) i;
+create table stack_s as select (i%40)+1 as a from generate_series(0,119) i;
+create table stack_t as select (i%11)+20 as b from generate_series(0,21) i;
+analyze stack_head, stack_s, stack_t;
+set local join_collapse_limit = 1;
+set local diamond_independent_lookup_expand = off;
+create table stack_expected as
+  select r.a,r.b,s.a as sa,t.b as tb from
+    (stack_head r join stack_s s on r.a=s.a) join stack_t t on r.b=t.b;
+set local diamond_independent_lookup_expand = on;
+select diamond_same_rows($q$
+  select r.a,r.b,s.a as sa,t.b as tb from
+    (stack_head r join stack_s s on r.a=s.a) join stack_t t on r.b=t.b
+$q$, 2, true) as adjacent_pairs_bag;
+create table stack_observed as
+  select * from test_deferred($q$
+    select r.a,r.b,s.a as sa,t.b as tb from
+      (stack_head r join stack_s s on r.a=s.a) join stack_t t on r.b=t.b
+  $q$, 11, 33) as result(a int,b int,sa int,tb int);
+select (select count(*) from stack_observed)=66 and not exists (
+  (table stack_expected except all table stack_observed)
+  union all
+  (table stack_observed except all table stack_expected)
+) as independently_deferred_bag;
+
+-- An expired owner must fail before accessing borrowed tuples.  This also
+-- exercises cleanup after an interrupted partially enumerated physical stack.
+savepoint expired_stack;
+select count(*) from test_deferred($q$
+  select r.a,r.b,s.a as sa,t.b as tb from
+    (stack_head r join stack_s s on r.a=s.a) join stack_t t on r.b=t.b
+$q$, 11, 33, true) as result(a int,b int,sa int,tb int);
+rollback to savepoint expired_stack;
+select diamond_same_rows('select r.k,s.k as sk from probe r join build s on r.k=s.k', 1, true) as usable_after_expired_stack;
+
+-- An invalid manually assembled stack must reject spilling deferred heads
+-- before output; ordinary adjacent pairs still support native batching.
+savepoint spilling_stack;
+select count(*) from test_deferred($q$
+  select r.a,r.b,s.a as sa,t.b as tb from
+    (stack_head r join stack_s s on r.a=s.a) join stack_t t on r.b=t.b
+$q$, 0, 0, false, true) as result(a int,b int,sa int,tb int);
+rollback to savepoint spilling_stack;
 rollback;

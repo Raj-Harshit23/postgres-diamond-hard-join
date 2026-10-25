@@ -1,44 +1,47 @@
 # Diamond-PG continuation plan
 
 Updated 2026-10-19. Read AGENTS.md and the four companion documents before
-functional work. Keep changes minimal, efficient, correct, well commented,
-and documented without redundant files or scaffolding.
+functional work. Keep work minimal, efficient, correct, well commented and
+documented in existing files.
 
 ## Current state
 
-- PostgreSQL base: 20devel, `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
-- Branch: `diamond-pg`. Phase 0 is committed as `7756e8e52e`; Phase 1 is
-  committed as `14ac927a8b`. Both use the user's identity without AI co-author
-  attribution. Nothing has been pushed; no push is authorized.
-- Phase 2 is complete and uncommitted in the working tree.
-  `diamond_lookup_expand` enables a bounded first-match cursor with immediate
-  expansion for eligible serial inner joins.
-  Phase 1's optional HashJoin counters remain independent. No independent
-  operators or Diamond planner alternatives exist yet.
-- Assertion/debug build, targeted test and all 240 core regressions pass.
-  A real timeout interrupted a live match's residual; the subsequent 16-batch
-  run reported 20,000 probes/successes/matches/emissions. Server stopped.
-  ASan compilation passed, but its test stopped before SQL on a LeakSanitizer
-  report in unchanged PostgreSQL startup; no sanitizer pass is claimed.
-- Commands/results are in TESTING.md and CHANGELOG.md; generated files remain
-  ignored under `scripts/diamond-pg/.work/`. Preserve the untracked paper.
+- PostgreSQL 20devel base: `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
+- Branch `diamond-pg`. Phase 0 `7756e8e52e`, Phase 1 `14ac927a8b`, Phase 2
+  `c169183521`. All project commits use the user's author/committer identity;
+  no AI co-author attribution. Nothing pushed; no push authorized.
+- Phase 2 was committed at the user's request before Phase 3 began.
+- Phase 3's bounded independent execution milestone is implemented and
+  validated, **uncommitted for review**. Separate Lookup/Expand Plans/States
+  own copied probe heads, transport typed immutable match snapshots, and
+  validate owner generations. The public opt-in constructor closes adjacent
+  pairs; an existing C regression fixture proves separated scheduling.
+- Native assertion/debug build, focused test and **all 240 core regressions
+  passed**. The stacked fixture yields 11 heads -> 33 pairs -> 66 rows per run
+  with native bag equivalence and whole-stack rewind. Actual owner rescan
+  and stack spill reject safely. A real 500ms timeout interrupts a live
+  residual; recovery yields 20,000 rows at each new node using 16 batches.
+- ASan compilation passed; testing stopped before SQL on the unchanged
+  777-byte PostgreSQL startup leak report. No sanitizer pass claimed.
+- Commands/results/limitations are in TESTING.md; file changes in CHANGELOG.md;
+  execution/ownership in ARCHITECTURE.md. Generated output remains ignored
+  under `scripts/diamond-pg/.work/`. Private server stopped; paper preserved.
 
-## Next step
+## Next step and boundary
 
-1. Review the uncommitted Phase 2 checkpoint; suggested message:
-   `diamond-pg: add immediate hash lookup and expand`. Do not auto-commit.
-2. Await user direction before Phase 3. It needs independent head/handle
-   transport and ownership, including nested deferred build payloads; do not
-   stretch the immediate cursor's borrowed lifetime across other operators.
-3. Before new work check status/diff/history, preserve team changes, and keep
-   code/comments/documentation minimal and useful. Use native build/test tools.
+Review the Phase 3 diff and commit only when requested. Suggested message:
+`diamond-pg: add independent lookup and expand execution`.
+Do not advance to Phase 4 without user direction.
 
-## Design constraints
+Nested deferred **build** payload storage is still outstanding. Current
+Lookup-to-Lookup transport covers probe heads, not storage inside a hash build.
+Resolve nested-build ownership before Phase 4's general chain/GYO acceptance.
+There are no Diamond Paths, acyclic optimizer, calibrated costs, Expand3,
+spill-aware selection or benchmark results yet.
 
-Phase 2 uses the paper's first-match iterator without collecting all matches.
-It borrows probe/batch storage only during immediate expansion. Phase 3's
-deferred references need explicit probe/key ownership and batch/table lifetime.
-Nested payloads must support chain as well as star plans. Ordinary native
-paths cannot compare deferred heads with fully expanded rows as if identical.
-Keep unsupported cases native. See IMPLEMENTATION_PLAN.md for later phases;
-do not implement them prematurely.
+Production stays serial, inner, strict/simple-key, with direct regular heap
+build scans and SeqScan/fully expanded Expand probes. Unsupported queries
+retain native plans. Internal unexpanded stacks must stay single-batch;
+sidecars never enter native SQL tuple materialization/spill. Phase 1 counters
+measure native HashJoins; new nodes use Actual Rows/Loops. New flag selection
+is planning-time; cached plans retain it. Maintain these boundaries explicitly.

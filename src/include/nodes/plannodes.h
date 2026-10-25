@@ -1075,6 +1075,30 @@ typedef struct HashJoin
 	List	   *hashkeys;
 } HashJoin;
 
+/*
+ * Diamond-PG: first-match Lookup shares native hash join inputs and equality
+ * metadata, but emits only the probe head plus an executor-private sidecar.
+ * No runtime pointers enter this serializable plan.  Native inheritance (as
+ * with IncrementalSort/Sort) keeps hash build/batch metadata in one place.
+ */
+typedef struct Lookup
+{
+	HashJoin	hashjoin;
+} Lookup;
+
+/*
+ * Diamond-PG: Expand binds INNER_VAR to the deferred Lookup's build tuple;
+ * OUTER_VAR addresses its current input head.  lookup_plan_id identifies the
+ * owner through a contiguous Lookup/Expand chain.  final requires every
+ * deferred relation to have been expanded before ordinary SQL nodes see it.
+ */
+typedef struct Expand
+{
+	Join		join;
+	int			lookup_plan_id;
+	bool		final;
+} Expand;
+
 /* ----------------
  *		materialization node
  * ----------------

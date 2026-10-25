@@ -13020,6 +13020,36 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-independent-lookup-expand" xreflabel="diamond_independent_lookup_expand">
+      <term><varname>diamond_independent_lookup_expand</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>diamond_independent_lookup_expand</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: decompose eligible chosen hash joins into separate
+        <literal>Diamond Lookup</literal> and <literal>Diamond Expand</literal>
+        execution nodes. The default is <literal>off</literal>. This setting
+        takes effect during planning; cached plans retain their chosen nodes.
+        Only serial inner joins with strict, simple-column hash keys over
+        regular heap sequential scans are eligible. A fully expanded pair may
+        supply the next pair's probe input. Other inputs, parallel queries,
+        subplans, row locking and data modification retain native plans.
+       </para>
+       <para>
+        Lookup returns a copied probe head with a private first-match reference;
+        Expand enumerates duplicates and applies the original residuals and
+        projection. Public plans close each pair before exposing ordinary SQL
+        tuples, preserving native batching. This experimental control adds no
+        join search, independent scheduling policy or calibrated costing.
+        <command>EXPLAIN ANALYZE</command> reports each node's native row counts;
+        <varname>diamond_hashjoin_stats</varname> continues to measure native
+        hash joins separately.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-diamond-lookup-expand" xreflabel="diamond_lookup_expand">
       <term><varname>diamond_lookup_expand</varname> (<type>boolean</type>)
       <indexterm>

@@ -1,8 +1,8 @@
 # Diamond-PG architecture and Phase 0 source map
 
-Last updated: 2026-10-19. **Phase 2 adds opt-in immediate Lookup/Expand
-inside eligible native HashJoins**, alongside Phase 1 counters. Independent
-operators and Diamond planner paths remain future work.
+Last updated: 2026-10-19. Phase 2 is committed. **Phase 3 adds separate
+Lookup/Expand execution nodes and owned deferred heads**, alongside the
+immediate path and native counters. Diamond Path search remains future work.
 
 ## Reproducible base and audit scope
 
@@ -12,8 +12,8 @@ operators and Diamond planner paths remain future work.
 | PostgreSQL source base | `6296e78c3d2c7406bb450c5ae477b2fef58f155e` |
 | Base subject | Add "own_hash" to pg_stat_kind_info |
 | Base author timestamp | 2026-10-13 13:47:25 +0900 |
-| Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b` |
-| Current working tree | Phase 2 immediate Lookup/Expand; validated, uncommitted |
+| Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b`; Phase 2: `c169183521` |
+| Current work | Phase 3 bounded independent execution validated; uncommitted for review |
 | Working branch | `diamond-pg`, created locally from the above HEAD |
 | Origin | `https://github.com/Raj-Harshit23/postgres-diamond-hard-join.git` |
 | Initial tracked diff | Empty, including the index |
@@ -22,7 +22,7 @@ operators and Diamond planner paths remain future work.
 
 This is the exact local baseline, not a claim that a remote upstream ref was
 verified. `origin/master` pointed at the base commit at the initial audit.
-The two project checkpoints above were subsequently committed locally; no
+The project checkpoints above were subsequently committed locally; no
 push, merge, rebase, or PR has been performed.
 
 The repository is the PostgreSQL source tree: `src/backend`, `src/include`,
@@ -310,7 +310,7 @@ Both Lookups use already-expanded r attributes, so t can reject r before
 s fanout is enumerated. If a later key instead requires an attribute from
 s, this simple pushdown is illegal until that value is expanded. For a
 chain, the paper also permits nested state (`r -> (s -> t)`) stored with
-the build tuples; Phase 3 must leave room for that.
+the build tuples; nested deferred build storage is still outstanding.
 
 Three textual edges `r.a=s.a`, `s.a=t.a`, `r.a=t.a` do not make a genuine
 cycle: equality implication removes the redundant edge. The true triangle
@@ -338,21 +338,10 @@ restricted lifetime contract below. It avoids an O(fanout) reference array
 or copied match list. This does not supply Expand3's per-key match counts or
 secondary indexes: a mixed-key bucket length is not a match-set length.
 
-**Phase 3:** independently schedulable operations require a new internal
-stream contract, proposed Lookup/Expand PlanStates and Plans, and a way to
-carry head values plus multiple/nested deferred descriptors. A dedicated
-internal slot/sidecar protocol versus an executor-owned composite payload
-must be compared before implementation. Do not pass a process pointer as
-a generic SQL Datum through Sort, Material, Gather, or disk storage.
-
-At minimum inspect/change `include/nodes/plannodes.h`, `execnodes.h`,
-executor node files/headers, `execProcnode.c`, `execAmi.c`, `explain.c`,
-`optimizer/plan/{createplan.c,setrefs.c}`, and node walkers in
-`backend/nodes/nodeFuncs.c`. `backend/nodes/README` describes generated
-NodeTags/copy/output/read support: edit annotated source headers, audit
-generated results, never hand-edit the generated files. Audit
-`execParallel.c`, `optimizer/plan/subselect.c`, capability checks, and all
-comparable native node references before claiming infrastructure complete.
+**Phase 3:** separate Plan/PlanState types use typed, executor-private
+sidecars for deferred relations; the implemented contract is described below.
+They never encode a process pointer as a SQL Datum. Nested deferred build
+payloads remain a separate unresolved storage problem before chain planning.
 
 **Phase 4:** add L&E-aware Path representation in `pathnodes.h`, construction
 and interface support in `util/pathnode.c`/`include/optimizer/pathnode.h`,
@@ -494,3 +483,78 @@ probe is expanded entirely within its resident batch. Only native tuples
 and saved hashes spill; a cursor never does. This is immediate decomposition,
 not independent scheduling, a new executor node, acyclic planning or a
 speedup result. Commands, test evidence and limitations are in TESTING.md.
+
+## Phase 3: independent Lookup and Expand execution
+
+`diamond_independent_lookup_expand` defaults off and acts during planning.
+Cached plans retain the selected nodes. The constructor decomposes an already
+chosen eligible native HashJoin into adjacent Expand -> Lookup -> probe and
+Hash/build inputs, after native reference fixing in `setrefs.c`. There are no
+new Paths, scheduling policy, join-order search or calibrated costs. Existing
+chosen costs are retained as display metadata; Lookup's rows are an upper
+bound from its probe input, not a new selectivity model.
+
+Eligibility is serial inner joins with strict, simple-column hash keys over
+regular heap SeqScans. A fully expanded prior Expand may supply the probe;
+the build must remain a direct heap SeqScan. Parallel-mode statements/workers,
+subplans, row locking, DML/modifying CTEs, expression keys and other inputs
+retain native plans. Simple key lineage is checked through final Expand
+projections. The whole-statement DML gate also covers SELECT subqueries.
+
+| Structure/function | Responsibility |
+| --- | --- |
+| `Lookup` / `LookupState` | Native HashJoin/HashJoinState inheritance; hash metadata plus query-owned owner/generation, per-head context, copied probe and deferred sidecar |
+| `Expand` / `ExpandState` | Original join projection/residuals, Lookup plan ID, final-boundary flag; owner, private mutable iterator, borrowed input head, match slot and per-head sidecar context |
+| `DiamondDeferredMatch` | Immutable snapshot: query-owned Lookup owner, generation and first-match cursor borrowing its probe/table batch |
+| `ExecInitHashJoinState` / `ExecHashJoinFirstMatch` | Reuse native serial hash initialization/build/batching/admission, stopping at the first equality match without residuals or joined-row projection |
+| `ExecLookup` | Retire previous generation, find a match, copy the probe into an owned MinimalTuple and copy incoming immutable sidecars before appending its own |
+| `ExecExpand` | Bind the owner's snapshot, copy its cursor locally, remove only that owner from the transported sidecar, enumerate/equality-recheck, apply original residuals and projection |
+| `create_diamond_lookup_expand` / `find_diamond_lookup_plan` | Conservative physical constructor and owner resolution through a contiguous Lookup/Expand chain |
+
+The copied probe is essential: child Buffer/Virtual slots can change on the
+next pull. Equality runs first on the child and later on the MinimalTuple
+copy, so its outer deformation is dynamic; admission hashing still uses the
+native child specialization. Expand's inner slot is also dynamic because its
+build owner is not a physical right child. Slot-type assertions remain active.
+
+Sidecar records/list cells belong to the current producer's head context.
+The owner/generation remains in the query context. Each Expand validates the
+generation **before** dereferencing the borrowed probe or hash tuple. Next
+head, rescan and end invalidate before clearing tuples/resetting contexts or
+native storage. Each Expand uses its own cursor: another relation's expansion
+may replicate a head and restart its still-deferred immutable match set,
+preserving duplicate multiplicities. Expression contexts reset per candidate;
+shutdown preserves live state between NO SCROLL FETCHes. PostgreSQL query and
+resource-owner cleanup handles cancellation/error unwinding.
+
+Only Lookup/Expand transport sidecars. `final=true` requires no remaining
+deferred relations before ordinary SQL tuple consumers (Sort, Material,
+Aggregate, native joins, etc.). There are no runtime pointers in Plans or SQL
+Datums. Hash build input is fully expanded; **nested deferred build storage
+is not implemented**. Thus general chain/GYO plans are not yet supported.
+
+Production closes each pair, so native hash batching/skew and parameterized
+rebuilds remain valid. An internally assembled deferred-head stack requires
+its consuming Lookup's table to stay single-batch: native batch files contain
+SQL tuples, not sidecars. A post-build guard rejects multiple batches before
+any output. It cannot silently restart after emitting rows. These guards are
+an execution boundary, not the later spill-aware optimization extension.
+
+Infrastructure audit: generated copy/output/read support derives from the
+node headers, with no generated-file edits. New IDs are unique; original
+projection/quals and conservative extParam/allParam sets are preserved.
+`SS_finalize_plan` precedes reference fixing, so it never receives new nodes;
+no new Param expressions are introduced. PlanState walkers follow generic
+left/right children; Init/End/Rescan/Shutdown dispatch and EXPLAIN/deparse are
+integrated. Native capability defaults reject backward/mark support. Parallel
+planning is gated, initialization checks again, and DSM estimation rejects
+these private-sidecar nodes. Both Make and Meson source lists include the node.
+Meson execution itself has not been tested.
+
+The existing C regression module assembles real L1 -> L2 -> E1 -> E2 states
+without shipping an optimizer policy. Per execution L2 returns 11 heads,
+E1 emits 33 pairs and E2 emits 66 rows, compared as a multiset against native
+execution. It also exercises copy/read round trips, whole-stack rewind,
+actual owner rescan invalidation and pre-output batch rejection. Ordinary SQL
+checks cover adjacent pairs and conservative fallbacks. Final results and
+commands are maintained in TESTING.md; no paper speedup/bound claim follows.

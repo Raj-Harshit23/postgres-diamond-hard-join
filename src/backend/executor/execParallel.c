@@ -314,6 +314,11 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			ExecBitmapHeapInstrumentEstimate((BitmapHeapScanState *) planstate,
 											 e->pcxt);
 			break;
+		case T_LookupState:
+		case T_ExpandState:
+			/* Diamond-PG: private head sidecars cannot enter a DSM plan. */
+			elog(ERROR, "Diamond Lookup/Expand cannot execute in parallel");
+			break;
 		case T_HashJoinState:
 			/* Diamond-PG: instrument private worker hashes as well. */
 			ExecHashJoinEstimate((HashJoinState *) planstate, e->pcxt);

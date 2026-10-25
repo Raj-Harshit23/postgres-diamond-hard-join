@@ -4,7 +4,76 @@ File changes and reasons are recorded here; [TESTING.md](TESTING.md) owns
 runnable commands, observed results and evidence paths. Execution flow,
 ownership and paper mapping are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 2026-10-19 - Phase 2: immediate Lookup/Expand (uncommitted)
+## 2026-10-19 - Phase 3: independent execution (uncommitted)
+
+The user requested and verified Phase 2's commit, then authorized Phase 3.
+Selected native Plan/PlanState inheritance and typed sidecars over SQL pointer
+Datums or copied match arrays. Public planning only splits a chosen HashJoin
+into adjacent operators; the existing C test module constructs separated
+physical stacks. No Phase 4 Paths/search or cost-based selection was added.
+
+| File | Change |
+| --- | --- |
+| `src/include/nodes/plannodes.h` | Serializable Lookup (HashJoin metadata) and Expand (original Join, owner plan ID, final boundary) |
+| `src/include/nodes/execnodes.h` | LookupState owner/generation/copied head; ExpandState private cursor, match slot and propagated sidecar |
+| `src/include/executor/nodeLookupExpand.h` | New required node header; immutable DiamondDeferredMatch and lifecycle APIs |
+| `src/backend/executor/nodeLookupExpand.c` | New required node implementation; first-match head copying, typed transport, duplicate-safe Expand, stale-reference checks, rescan/end ordering and FETCH lifetime |
+| `src/backend/executor/nodeHashjoin.c` | Share initialization/native hash state machine; first-match-only entry, dynamic equality slot deformation, deferred-stack batch guard; native behavior remains specialized |
+| `src/include/executor/nodeHashjoin.h` | Shared initializer and first-match entry declarations |
+| `src/backend/executor/execProcnode.c` | Init/End and Lookup shutdown dispatch |
+| `src/backend/executor/execAmi.c` | Lookup/Expand rescan dispatch; conservative capability defaults retained |
+| `src/backend/executor/execParallel.c` | Explicit rejection of private-sidecar nodes during DSM estimation |
+| `src/backend/executor/Makefile` | Build the node implementation |
+| `src/backend/executor/meson.build` | Corresponding source registration; Meson not executed |
+| `src/backend/optimizer/plan/createplan.c` | Conservative post-reference physical constructor, whole-statement gates, simple-key lineage and Lookup owner resolution |
+| `src/backend/optimizer/plan/setrefs.c` | Invoke decomposition after native references/Params/parallel decisions; unique additional node ID |
+| `src/include/optimizer/planmain.h` | Constructor/owner lookup declarations |
+| `src/backend/utils/adt/ruleutils.c` | Resolve Expand INNER_VAR to the owning Lookup build for EXPLAIN |
+| `src/backend/commands/explain.c` | Separate node names, Lookup equality and Expand residual/filter reporting |
+| `src/backend/utils/misc/guc_parameters.dat` | Off-by-default planning-time diamond_independent_lookup_expand; generator input only |
+| `src/backend/utils/misc/guc_tables.c` | Include its declaration |
+| `doc/src/sgml/config.sgml` | Planning/cache behavior, scope, row measurements and fallback |
+| `src/test/regress/regress.c` | Existing C module constructs L1-L2-E1-E2, remaps head keys, copy/read roundtrip, counts intermediate rows, rewinds, invalidates a paused owner and forces batch rejection |
+| `src/test/regress/sql/diamond_hashjoin.sql` | Reuse differential helper for both modes; independent node/bag/lifecycle/fallback cases and stacked 66-row multiset |
+| `src/test/regress/expected/diamond_hashjoin.out` | Reviewed true boolean oracles and two deliberate ownership/spill errors |
+| `AGENTS.md` | Phase 2 checkpoint, Phase 3 authorization and Phase 4 boundary |
+| `docs/diamond-pg/ARCHITECTURE.md` | Actual fields/functions, ownership, execution and audited node infrastructure; explicit unsupported nested build storage |
+| `docs/diamond-pg/IMPLEMENTATION_PLAN.md` | Bounded Phase 3 implementation and remaining chain/nested-build prerequisite |
+| `docs/diamond-pg/EXECPLAN.md` | Current checkpoint, validation and review handoff |
+| `docs/diamond-pg/TESTING.md` | Header-dependent build instructions, reusable runtime command, regression/sanitizer evidence and results |
+| `docs/diamond-pg/CHANGELOG.md` | This change/decision/evidence ledger and Phase 2 commit status |
+
+Meaningful development corrections: new NodeTags exposed stale objects in the
+old build without header dependencies (initdb failed before SQL); a standard
+clean rebuild with --enable-depend fixed it. Assertion testing then caught
+Buffer/Virtual versus owned MinimalTuple probe deformation in equality; dynamic
+outer equality preserves slot assertions and fixes that real ABI mismatch.
+Output review corrected numeric JSON row comparisons and used the standard
+PG_LIBDIR/PG_DLSUFFIX regression library loading. The internal spill fixture
+now changes only a sizing estimate, so planner orientation cannot hide the
+batch guard. No temporary dependency or disabled correctness checks were used.
+
+Validation: native assertion/debug build, focused regression and **all 240
+core regressions pass**;
+all multiset/row-count oracles are true. Per stacked execution L2 returns 11
+heads before E1 emits 33 pairs and E2 emits 66 rows, including a full rewind.
+Actual owner rescan fails safely; a multi-batch stack fails before output.
+Public cases cover duplicate/NULL, text/multi-key/collision, residual/projection,
+volatile calls, unique/empty/no-match/LIMIT, batches/skew, parameterized partial
+rebuild, NO SCROLL FETCH, serialization and native fallbacks. A real 500ms
+timeout interrupts a live residual; recovery returns 20,000 rows at both new
+nodes using 16 hash batches. The private server is stopped. Native pgindent and final whitespace/diff
+checks pass. TESTING.md records runnable commands and saved evidence.
+
+ASan compilation passes; its test again stops before SQL on the existing
+777-byte save_ps_display_args startup leak report. No sanitizer execution,
+check-world, benchmark or speedup pass is claimed. Nested deferred build
+storage/general acyclic scheduling remains unimplemented; no sidecars enter
+ordinary materialization or disk storage. Phase 3 is uncommitted; nothing
+pushed. Only the two required native node source/header files were added;
+no helper scripts or Markdown files. Raw output stays in ignored .work.
+
+## 2026-10-19 - Phase 2: immediate Lookup/Expand
 
 Authorized by the user after Phase 1. Selected the paper's first-match cursor
 over eager match arrays/copies. This proves immediate decomposition inside
@@ -52,10 +121,11 @@ benchmark, check-world or performance pass is claimed. Details/evidence are
 in [TESTING.md](TESTING.md#actual-validation-ledger).
 
 No source/helper/Markdown files were added; generated validation output stays
-in ignored .work. No commit or push was made. Suggested message:
-`diamond-pg: add immediate hash lookup and expand`.
+in ignored .work. Committed at the user's request as `c169183521`,
+`diamond-pg: add immediate hash lookup and expand`, with the user's author
+and committer identity and no co-author attribution. Nothing was pushed.
 
-## 2026-10-19 - Post-commit documentation audit (uncommitted)
+## 2026-10-19 - Post-Phase 1 documentation audit (included in Phase 2)
 
 - `AGENTS.md`: make automatic maintenance of affected documents explicit;
   record the completed Phase 1 checkpoint.
