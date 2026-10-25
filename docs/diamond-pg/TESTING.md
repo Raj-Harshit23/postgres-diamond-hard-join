@@ -405,10 +405,12 @@ Publication attempt, 2026-10-25: committed the reviewed 28-file Phase 3 diff
 and no co-author trailer. `git ls-remote --heads origin diamond-pg master`
 found only master. `git push --set-upstream origin diamond-pg` failed with
 `could not read Username for 'https://github.com'`: no Git credential helper
-is configured and `gh` is not installed. No remote branch was created. Resume
-that exact push from an authenticated terminal, then compare `git rev-parse
-HEAD` with `git ls-remote --heads origin diamond-pg`. PDF/build output remains
-excluded. Existing test evidence below was verified; no tests rerun for this
+was configured and `gh` was not installed. That attempt created no branch.
+A subsequent `git ls-remote --heads origin diamond-pg` returned
+`9ee4d297b3a85cfb6022e598135b38810bc8184a`, matching `git rev-parse HEAD`;
+publication of the project and docs is therefore verified through that commit.
+`git ls-tree -r --name-only HEAD docs/diamond-pg` confirms all five documents
+are tracked. PDF/build output remains excluded. Existing test evidence below was verified; no tests rerun for this
 commit/publication-only task.
 
 

@@ -4,7 +4,7 @@ File changes and reasons are recorded here; [TESTING.md](TESTING.md) owns
 runnable commands, observed results and evidence paths. Execution flow,
 ownership and paper mapping are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 2026-10-25 - Phase 3 checkpoint and publication attempt
+## 2026-10-25 - Phase 3 checkpoint and verified publication
 
 Committed the reviewed Phase 3 work as `0aa87a8624`,
 `diamond-pg: add independent lookup and expand execution`, with the user's
@@ -14,13 +14,17 @@ were verified; no functional changes or new test runs.
 
 The user authorized pushing current progress. Remote inspection found only
 master. The normal `git push --set-upstream origin diamond-pg` failed because
-GitHub HTTPS credentials are unavailable; no branch was created. Authentication
-in the user's terminal is required before publication can complete.
+GitHub HTTPS credentials were unavailable; that attempt created no branch.
+Subsequent remote verification returned `9ee4d297b3`, matching local HEAD,
+confirming all project progress and the five project documents were published
+on `origin/diamond-pg`.
 
 Documentation follow-up: `AGENTS.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`
 and `EXECPLAN.md` record the Phase 3 commit and pending publication; `TESTING.md`
 records exact commands/results; `CHANGELOG.md` records this checkpoint.
-No additional source/helper/Markdown files were added.
+Publication-status correction: `AGENTS.md`, `ARCHITECTURE.md`, `EXECPLAN.md`,
+`TESTING.md` and this changelog now record the verified remote checkpoint.
+No source changes or new test runs; no additional files were added.
 
 ## 2026-10-19 - Phase 3: independent execution (committed 2026-10-25)
 
@@ -88,7 +92,7 @@ ASan compilation passes; its test again stops before SQL on the existing
 check-world, benchmark or speedup pass is claimed. Nested deferred build
 storage/general acyclic scheduling remains unimplemented; no sidecars enter
 ordinary materialization or disk storage. Committed on 2026-10-25 as
-`0aa87a8624`; authenticated publication remains pending. Only the two required native node source/header files were added;
+`0aa87a8624`; publication verified through `9ee4d297b3`. Only the two required native node source/header files were added;
 no helper scripts or Markdown files. Raw output stays in ignored .work.
 
 ## 2026-10-19 - Phase 2: immediate Lookup/Expand

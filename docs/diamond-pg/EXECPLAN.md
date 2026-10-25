@@ -10,7 +10,8 @@ documented in existing files.
 - Branch `diamond-pg`. Phase 0 `7756e8e52e`, Phase 1 `14ac927a8b`, Phase 2
   `c169183521`, bounded Phase 3 `0aa87a8624`. All project commits use the user's author/committer identity;
   no AI co-author attribution. Publication was authorized on 2026-10-25;
-  the initial HTTPS push failed because GitHub credentials are unavailable.
+  remote verification confirmed project/docs through `9ee4d297b3` on
+  `origin/diamond-pg` after the initial authentication failure.
 - Phase 2 was committed at the user's request before Phase 3 began.
 - Phase 3's bounded independent execution milestone is implemented and
   validated, **committed as `0aa87a8624`**. Separate Lookup/Expand Plans/States
@@ -30,11 +31,9 @@ documented in existing files.
 
 ## Next step and boundary
 
-Complete the authorized publication with `git push --set-upstream origin
-diamond-pg` from an authenticated terminal. Verify the remote branch matches
-local HEAD. The initial push failed with "could not read Username"; GitHub CLI
-is not installed and no Git credential helper is configured. Do not put
-credentials in project files or chat.
+Project and documentation publication is verified through `9ee4d297b3`.
+Continue within the authorized Phase 3 boundary; nested build ownership
+remains outstanding.
 Do not advance to Phase 4 without user direction.
 
 Nested deferred **build** payload storage is still outstanding. Current

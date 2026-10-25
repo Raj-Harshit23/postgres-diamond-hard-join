@@ -13,7 +13,7 @@ immediate path and native counters. Diamond Path search remains future work.
 | Base subject | Add "own_hash" to pg_stat_kind_info |
 | Base author timestamp | 2026-10-13 13:47:25 +0900 |
 | Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b`; Phase 2: `c169183521`; bounded Phase 3: `0aa87a8624` |
-| Current work | Phase 3 bounded independent execution committed; authenticated publication pending |
+| Current work | Phase 3 bounded independent execution committed; project/docs published through 9ee4d297b3 |
 | Working branch | `diamond-pg`, created locally from the above HEAD |
 | Origin | `https://github.com/Raj-Harshit23/postgres-diamond-hard-join.git` |
 | Initial tracked diff | Empty, including the index |
@@ -22,9 +22,10 @@ immediate path and native counters. Diamond Path search remains future work.
 
 This is the exact local baseline, not a claim that a remote upstream ref was
 verified. `origin/master` pointed at the base commit at the initial audit.
-The project checkpoints above were subsequently committed locally. Publication
-was authorized on 2026-10-25, but the HTTPS push failed for missing GitHub
-authentication. No successful push, merge, rebase or PR has been performed.
+Publication was authorized on 2026-10-25. After an initial authentication
+failure, remote verification confirmed `origin/diamond-pg` at `9ee4d297b3`,
+including the project checkpoints and all five project documents. No merge,
+rebase or PR has been performed.
 
 The repository is the PostgreSQL source tree: `src/backend`, `src/include`,
 clients/interfaces, `src/test`, `contrib`, `doc/src/sgml`, build configuration,

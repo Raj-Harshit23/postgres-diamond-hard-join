@@ -44,7 +44,8 @@ records validation and the sanitizer limitation. The user has authorized
 Phase 3: independently represented execution and its ownership contract.
 Its bounded independent-node milestone is implemented/validated and committed
 as `0aa87a8624`; nested deferred build storage is still outstanding. The user
-authorized publication on 2026-10-25; HTTPS push awaits GitHub authentication.
+authorized publication on 2026-10-25; remote verification confirmed the project
+and documentation through `9ee4d297b3` on `origin/diamond-pg`.
 Do not advance to Phase 4 without user direction.
 
 Before substantial work, read:
