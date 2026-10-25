@@ -1,6 +1,6 @@
 # Diamond-PG architecture and Phase 0 source map
 
-Last updated: 2026-10-19. Phase 2 is committed. **Phase 3 adds separate
+Last updated: 2026-10-25. Phase 2 is committed. **Phase 3 adds separate
 Lookup/Expand execution nodes and owned deferred heads**, alongside the
 immediate path and native counters. Diamond Path search remains future work.
 
@@ -12,8 +12,8 @@ immediate path and native counters. Diamond Path search remains future work.
 | PostgreSQL source base | `6296e78c3d2c7406bb450c5ae477b2fef58f155e` |
 | Base subject | Add "own_hash" to pg_stat_kind_info |
 | Base author timestamp | 2026-10-13 13:47:25 +0900 |
-| Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b`; Phase 2: `c169183521` |
-| Current work | Phase 3 bounded independent execution validated; uncommitted for review |
+| Completed project checkpoints | Phase 0: `7756e8e52e`; Phase 1: `14ac927a8b`; Phase 2: `c169183521`; bounded Phase 3: `0aa87a8624` |
+| Current work | Phase 3 bounded independent execution committed; authenticated publication pending |
 | Working branch | `diamond-pg`, created locally from the above HEAD |
 | Origin | `https://github.com/Raj-Harshit23/postgres-diamond-hard-join.git` |
 | Initial tracked diff | Empty, including the index |
@@ -22,8 +22,9 @@ immediate path and native counters. Diamond Path search remains future work.
 
 This is the exact local baseline, not a claim that a remote upstream ref was
 verified. `origin/master` pointed at the base commit at the initial audit.
-The project checkpoints above were subsequently committed locally; no
-push, merge, rebase, or PR has been performed.
+The project checkpoints above were subsequently committed locally. Publication
+was authorized on 2026-10-25, but the HTTPS push failed for missing GitHub
+authentication. No successful push, merge, rebase or PR has been performed.
 
 The repository is the PostgreSQL source tree: `src/backend`, `src/include`,
 clients/interfaces, `src/test`, `contrib`, `doc/src/sgml`, build configuration,

@@ -1,6 +1,6 @@
 # Diamond-PG implementation plan
 
-Updated 2026-10-19. Base: `6296e78c3d2c7406bb450c5ae477b2fef58f155e`,
+Updated 2026-10-25. Base: `6296e78c3d2c7406bb450c5ae477b2fef58f155e`,
 PostgreSQL 20devel; local branch `diamond-pg`. ARCHITECTURE.md is the source
 map and design explanation; EXECPLAN.md is the session continuation guide.
 
@@ -11,7 +11,7 @@ map and design explanation; EXECPLAN.md is the session continuation guide.
 | 0: repository/paper mapping | Complete; system-package build, 239 regressions and runtime fixtures passed | Native planner/executor traces, paper mapping, invariants, tests, next-phase proposal; no functional changes |
 | 1: native instrumentation | Complete; build, all 240 regressions and two-worker runtime checks passed | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
 | 2: match representation | Complete, committed as c169183521; build, focused/240 tests and timeout/recovery passed; sanitizer execution blocked before SQL | First-match cursor with immediate Expand inside eligible serial inner HashJoins; native alternatives/fallback preserved |
-| 3: first-class operations | Bounded independent nodes validated; uncommitted; nested deferred builds outstanding | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
+| 3: first-class operations | Bounded independent nodes validated, committed as 0aa87a8624; nested deferred builds outstanding | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
 | 4: acyclic plans | Not started | Eligible alpha-acyclic inner-equijoin regions; legal paper-derived scheduling; native alternatives retained |
 | 5: cost and selection | Not started | Cost-based competition plus optional experimental controls; eligible does not mean forced |
 | 6: Expand3 | Not started | Correct three-relation cyclic equijoin using smaller-set iteration and secondary hashing |

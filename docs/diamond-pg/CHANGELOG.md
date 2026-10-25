@@ -4,7 +4,25 @@ File changes and reasons are recorded here; [TESTING.md](TESTING.md) owns
 runnable commands, observed results and evidence paths. Execution flow,
 ownership and paper mapping are in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 2026-10-19 - Phase 3: independent execution (uncommitted)
+## 2026-10-25 - Phase 3 checkpoint and publication attempt
+
+Committed the reviewed Phase 3 work as `0aa87a8624`,
+`diamond-pg: add independent lookup and expand execution`, with the user's
+author/committer identity and no co-author attribution. Preserved the PDF and
+ignored artifacts. Existing passing test evidence and staged whitespace checks
+were verified; no functional changes or new test runs.
+
+The user authorized pushing current progress. Remote inspection found only
+master. The normal `git push --set-upstream origin diamond-pg` failed because
+GitHub HTTPS credentials are unavailable; no branch was created. Authentication
+in the user's terminal is required before publication can complete.
+
+Documentation follow-up: `AGENTS.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`
+and `EXECPLAN.md` record the Phase 3 commit and pending publication; `TESTING.md`
+records exact commands/results; `CHANGELOG.md` records this checkpoint.
+No additional source/helper/Markdown files were added.
+
+## 2026-10-19 - Phase 3: independent execution (committed 2026-10-25)
 
 The user requested and verified Phase 2's commit, then authorized Phase 3.
 Selected native Plan/PlanState inheritance and typed sidecars over SQL pointer
@@ -69,8 +87,8 @@ ASan compilation passes; its test again stops before SQL on the existing
 777-byte save_ps_display_args startup leak report. No sanitizer execution,
 check-world, benchmark or speedup pass is claimed. Nested deferred build
 storage/general acyclic scheduling remains unimplemented; no sidecars enter
-ordinary materialization or disk storage. Phase 3 is uncommitted; nothing
-pushed. Only the two required native node source/header files were added;
+ordinary materialization or disk storage. Committed on 2026-10-25 as
+`0aa87a8624`; authenticated publication remains pending. Only the two required native node source/header files were added;
 no helper scripts or Markdown files. Raw output stays in ignored .work.
 
 ## 2026-10-19 - Phase 2: immediate Lookup/Expand

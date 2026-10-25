@@ -42,8 +42,9 @@ committed as `14ac927a8b`, following the Phase 0 commit `7756e8e52e`.
 Phase 2 immediate Lookup/Expand is committed as `c169183521`; TESTING.md
 records validation and the sanitizer limitation. The user has authorized
 Phase 3: independently represented execution and its ownership contract.
-Its bounded independent-node milestone is implemented/validated and remains
-uncommitted for review; nested deferred build storage is still outstanding.
+Its bounded independent-node milestone is implemented/validated and committed
+as `0aa87a8624`; nested deferred build storage is still outstanding. The user
+authorized publication on 2026-10-25; HTTPS push awaits GitHub authentication.
 Do not advance to Phase 4 without user direction.
 
 Before substantial work, read:

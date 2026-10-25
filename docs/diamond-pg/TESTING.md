@@ -1,10 +1,10 @@
 # Building and testing Diamond-PG
 
-Updated 2026-10-19. Baseline: PostgreSQL 20devel,
+Updated 2026-10-25. Baseline: PostgreSQL 20devel,
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
 Use the native build tools below. Staging or committing is **not** required
 before building/testing: both use the current working tree. Phase 2 is
-committed as `c169183521`; Phase 3 changes remain uncommitted for review.
+committed as `c169183521`; bounded Phase 3 is committed as `0aa87a8624`.
 
 ## 1. System dependencies (Ubuntu 24.04)
 
@@ -399,6 +399,18 @@ planning time, intermediate rows, hash memory/batches/temp I/O and correctness.
 No benchmark results or performance claim exist yet.
 
 ## Actual validation ledger
+
+Publication attempt, 2026-10-25: committed the reviewed 28-file Phase 3 diff
+(+1,594/-150 lines) as `0aa87a8624`, using the user's author/committer identity
+and no co-author trailer. `git ls-remote --heads origin diamond-pg master`
+found only master. `git push --set-upstream origin diamond-pg` failed with
+`could not read Username for 'https://github.com'`: no Git credential helper
+is configured and `gh` is not installed. No remote branch was created. Resume
+that exact push from an authenticated terminal, then compare `git rev-parse
+HEAD` with `git ls-remote --heads origin diamond-pg`. PDF/build output remains
+excluded. Existing test evidence below was verified; no tests rerun for this
+commit/publication-only task.
+
 
 - Phase 0: system-package assertion/debug build, all 239 original core tests,
   and two-/three-table native fixtures passed (2026-10-19).

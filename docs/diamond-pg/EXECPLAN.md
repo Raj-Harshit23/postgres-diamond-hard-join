@@ -1,6 +1,6 @@
 # Diamond-PG continuation plan
 
-Updated 2026-10-19. Read AGENTS.md and the four companion documents before
+Updated 2026-10-25. Read AGENTS.md and the four companion documents before
 functional work. Keep work minimal, efficient, correct, well commented and
 documented in existing files.
 
@@ -8,11 +8,12 @@ documented in existing files.
 
 - PostgreSQL 20devel base: `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
 - Branch `diamond-pg`. Phase 0 `7756e8e52e`, Phase 1 `14ac927a8b`, Phase 2
-  `c169183521`. All project commits use the user's author/committer identity;
-  no AI co-author attribution. Nothing pushed; no push authorized.
+  `c169183521`, bounded Phase 3 `0aa87a8624`. All project commits use the user's author/committer identity;
+  no AI co-author attribution. Publication was authorized on 2026-10-25;
+  the initial HTTPS push failed because GitHub credentials are unavailable.
 - Phase 2 was committed at the user's request before Phase 3 began.
 - Phase 3's bounded independent execution milestone is implemented and
-  validated, **uncommitted for review**. Separate Lookup/Expand Plans/States
+  validated, **committed as `0aa87a8624`**. Separate Lookup/Expand Plans/States
   own copied probe heads, transport typed immutable match snapshots, and
   validate owner generations. The public opt-in constructor closes adjacent
   pairs; an existing C regression fixture proves separated scheduling.
@@ -29,8 +30,11 @@ documented in existing files.
 
 ## Next step and boundary
 
-Review the Phase 3 diff and commit only when requested. Suggested message:
-`diamond-pg: add independent lookup and expand execution`.
+Complete the authorized publication with `git push --set-upstream origin
+diamond-pg` from an authenticated terminal. Verify the remote branch matches
+local HEAD. The initial push failed with "could not read Username"; GitHub CLI
+is not installed and no Git credential helper is configured. Do not put
+credentials in project files or chat.
 Do not advance to Phase 4 without user direction.
 
 Nested deferred **build** payload storage is still outstanding. Current
