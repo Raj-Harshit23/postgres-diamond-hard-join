@@ -1,5 +1,361 @@
 # Building and testing Diamond-PG
 
+This validated bounded implementation/diagnosis is being checkpointed with
+user-authorized normal commit/push and user authorship. Paper Section4
+correction (GEQO excluded) remains the next milestone; none of its proposed
+changes is implied by the validation results below.
+
+## Current automatic integration validation (2026-10-31)
+
+The final current-source assertion/debug/header-dependent build completed,
+then focused Diamond 1/1 and full core 240/240 passed at06:20UTC. Evidence:
+`scripts/diamond-pg/.work/build/acyclic-{clean,build,targeted,check}.log`.
+No expected-output changes were accepted without reviewing the added oracles.
+
+New coverage includes actual cost-selected stars, nested four-relation chains
+and branching, duplicate/NULL/text/multi-key bags, projection/base filters,
+redundant same-EC triangle (ordered diagnostic), genuine cycle and unsupported
+expression/cross-residual native fallback, native winning cheaply, generated
+copy/read, full rewind, initial batching and actual allocation rejection,
+prepared external parameters and cached plan stability after GUC changes,
+forward cursor pause/resume,1ms cancellation after a live head and recovery.
+The64 KiB execution-memory fixture plans at16 MiB and verifies the3.2m-row
+native-fallback bag with EXCEPT ALL both ways. Raw pointer spill is prohibited.
+
+Use the local dependency activation below, then from the repository root:
+
+```sh
+make -C "$diamond_work/build" -j4
+make -C "$diamond_work/build/src/test/regress" check-tests TESTS=diamond_hashjoin
+make -C "$diamond_work/build" check
+```
+
+The optimized build uses the same source with `--enable-depend`, without
+assertions/debug, prefix `$diamond_work/install-opt`. Full TPC-H SF1 and
+standard May2013 JOB data (all 21 tables, primary/supplied FK indexes) are loaded,
+VACUUM ANALYZE completed. Preserved server uses Unix socket `$diamond_work/s`,
+port55434,TCP disabled,1 GiB shared buffers,64 MiB work_mem,hash_mem_multiplier2,
+jit off and normal native methods/indexes with parallel-gather workers2.
+The automatic control is compared off/on; older adjacent controls stay off.
+
+```sh
+python3 scripts/diamond-pg/benchmark.py tpch job paper
+```
+
+The optimized run completed. The runner first compares result
+bags (warmup), then measures three interleaved EXPLAIN ANALYZE BUFFERS JSON
+repetitions and medians, recording planning/execution, chosen/executed Diamond,
+fallback, rows/loops, hash memory/batches and temp I/O.30s per TPC-H/JOB query,
+120s per paper query. Raw plans/results and incremental summaries are under
+`.work/bench-auto-opt/`; manifest/source patch are `.work/benchmark-manifest.json`
+and `.work/benchmark-source.patch`. TPC-H completed all22 queries in101.17s runner wall time:22 identical bags,
+no errors/timeouts, zero selected/executed Diamond regions. Sum of query
+execution medians:12.442794s native,12.476752s automatic (+0.27%); geometric
+native/automatic ratio 1.00475. Q21 slowed14.6%, Q19 improved5.0%, both native
+plans, so these differences do not demonstrate Diamond gains. JOB completed113/113 identical bags, no errors/timeouts,1125.80s wall time.
+Zero Diamond selections; sums of medians137.344067s native and136.914269s
+automatic; geometric native/automatic ratio0.997295. These native-plan
+measurements establish no Diamond speedup. JOB Q1b slowed25.8%; Q23b
+had the largest native/automatic ratio1.11445. All405 corresponding native
+plan pairs (three repetitions across135 queries) match in operator structure,
+conditions, relations/indexes, keys and planned parallel workers; execution
+variation cannot establish a Diamond executor gain or regression. Evidence:
+`.work/bench-auto-opt/native-plan-shape-review.json`. Paper
+Section5.1 exact formula usesN=50,000;N=1,000/5,000 are explicitly scaled runs.
+All must return the sole tuple(1,1,1,1). No forced native-method controls are
+part of this comparison. Total suite duration and per-query results will be
+recorded after completion.
+
+`scripts/diamond-pg/benchmark.py` preserves the runner for review; the current
+run uses its identical `.work/benchmark-auto.py` predecessor (only root-path
+resolution and the paper timeout description differ). Tables/queries must
+already exist. To reproduce the paper data in a fresh `diamond_micro` database,
+execute this SQL once, then use the SELECT template for eachN:
+
+```sql
+DO $$
+DECLARE n integer;
+BEGIN
+  FOREACH n IN ARRAY ARRAY[1000,5000,50000] LOOP
+    EXECUTE format('CREATE TABLE x%s AS SELECT 1::int a,1::int b
+      UNION ALL SELECT generate_series(1,%s),2',n,n);
+    EXECUTE format('CREATE TABLE y%s AS SELECT 1::int b,1::int c
+      UNION ALL SELECT 2,generate_series(4,%s)
+      UNION ALL SELECT generate_series(3,%s),3',n,n,n);
+    EXECUTE format('CREATE TABLE z%s AS SELECT 1::int c,1::int d
+      UNION ALL SELECT 3,generate_series(1,%s)',n,n);
+    EXECUTE format('ANALYZE x%s',n);
+    EXECUTE format('ANALYZE y%s',n);
+    EXECUTE format('ANALYZE z%s',n);
+  END LOOP;
+END $$;
+SELECT x.a,x.b,y.c,z.d FROM x50000 x
+ JOIN y50000 y ON x.b=y.b JOIN z50000 z ON y.c=z.c;
+```
+
+A source-review check examined generic parameter-only gating quals. Native
+planning distributes these as join RestrictInfos, so the existing `joininfo`
+eligibility guard keeps the Result/One-Time Filter boundary native. Prepared
+paper/star-shaped EXPLAINs confirmed that boundary, and the false paper gate
+returned zero rows. Evidence: `.work/gating-review-{before,fixture}.log`.
+No source change or benchmark restart was needed.
+
+Completed scaled paper measurements (exact formula, normal native alternatives,
+three interleaved repetitions, one expected tuple in both modes):
+
+|N|Native median ms|Automatic median ms|Native/automatic|Executed Lookup/Expand|
+|---|---:|---:|---:|---:|
+|1,000 (scaled)|128.031|0.583|219.61x|2/2|
+|5,000 (scaled)|2254.423|2.484|907.58x|2/2|
+
+Both automatically choose one Diamond wrapper with no runtime fallback.
+Native intermediate joins produce997,001 and24,985,001 rows respectively;
+Lookup chains reduce998/4,998 heads to one before either Expand. AtN1000,
+native hash peak is51,032KiB versus48KiB per Diamond table; atN5000 the
+largest native/automatic tables are519/260KiB. These completed runs show
+zero temp blocks; full-sizeN50,000 automatic execution completed with 23.877ms median,
+2/2 executed Lookup/Expand, no fallback, one expected result, two2466KiB
+single-batch hash tables and zero temp blocks. Native exceeded120s during
+the result check, so that scale has no paired native median, verified native
+bag or numeric speedup ratio; its three automatic repetitions have no
+interleaved native peer after the timeout. Total suite wall times: TPC-H101.17s,
+JOB1125.80s, paper131.55s; combined1358.53s (22m38.53s). Per-query results
+are `.work/bench-auto-opt/per-query.csv`; aggregate summaries are
+`.work/bench-auto-opt/report.json` and each suite's `summary.json`. They are PostgreSQL
+measurements of the paper's formula, not the paper's absolute-number reproduction.
+
+Annotated assertion/debug Valgrind SQL diagnostics completed: focused 1/1
+passed in 819.154s (13m39s), including the final actual-memory fallback and
+3.2m-row bag. A separate actually selected forward cursor closed after one of
+160,000 rows, then a native count verified recovery. Its EXPLAIN confirms a selected
+Diamond wrapper; the cursor closes before draining the remaining matches. Private diagnostic server
+on55435 is stopped; the optimized benchmark cluster on55434 is preserved.
+
+No invalid read/write/free or conditional-jump report appears in the diagnostic
+logs. Reports remain unsuppressed: native relcache/WAL uninitialized writes,
+native PostmasterMain startup allocations, and PL/pgSQL scanner allocations.
+The main SQL backend reports4,003 definitely-lost bytes in459 blocks and106
+errors from74 contexts, suppressed0. Reviewed leak records originate in
+unchanged native startup/scanner functions; none contains the new executor
+functions. This is a functional SQL pass under Valgrind, **not a clean memory
+pass**. Findings are retained rather than suppressing checks or claiming
+success. The earlier strict error-exitcode95 attempt failed before SQL on
+startup leaks; default nonfatal Valgrind exit behavior allowed this annotated
+SQL run while retaining every report. Matching signed glibc debug symbols and
+extra debuglink search resolved loader redirection; verification stayed on.
+Evidence: `.work/build-memcheck/{focused,early-close,server,stop}.log`,
+`valgrind.*.log` and `report.json`. The early-close reproduction SQL is
+`.work/build-memcheck/early-close.sql`. Earlier results below are historical
+checkpoints, including resolved dependencies and the adjacent-only baseline.
+
+The annotated memory build adds `-DUSE_VALGRIND` to CPPFLAGS and retains
+assertions/debug/header dependencies. Current diagnostic commands (preserved
+private `data-memcheck` cluster; never initialize over it) are:
+
+```sh
+make -C "$diamond_work/build-memcheck" -j4
+make -C "$diamond_work/build-memcheck" install
+VALGRIND_LIB="$diamond_work/tools/usr/libexec/valgrind" \
+ "$diamond_work/tools/usr/bin/valgrind" \
+ --extra-debuginfo-path="$diamond_work/tools/usr/lib/debug" \
+ --leak-check=full --show-leak-kinds=definite,indirect,possible \
+ --error-limit=no --num-callers=25 \
+ --log-file="$diamond_work/build-memcheck/valgrind.%p.log" \
+ "$diamond_work/install-memcheck/bin/postgres" \
+ -D "$diamond_work/data-memcheck" -k "$diamond_work/s" -p 55435 \
+ -c listen_addresses='' >"$diamond_work/build-memcheck/server.log" 2>&1 &
+# After the server log reports ready:
+PGHOST="$diamond_work/s" PGPORT=55435 \
+ make -C "$diamond_work/build-memcheck/src/test/regress" \
+ installcheck-tests TESTS=diamond_hashjoin
+"$diamond_work/install-memcheck/bin/pg_ctl" \
+ -D "$diamond_work/data-memcheck" -m fast -w stop
+```
+
+No memory-diagnostic workload overlapped final benchmark timing. Native
+`pgindent --check` on touched C/headers passed; `git diff --check` is clean.
+The measured and tracked benchmark runner function ASTs agree after excluding
+root-path resolution, docstrings and timeout-description metadata; both compile.
+Evidence: `.work/build/acyclic-indent-check.log` and
+`.work/benchmark-runner-review.log`.
+
+## Why automatic Diamond selection was zero (2026-10-31 follow-up)
+
+Traced all135 benchmark queries with temporary DEBUG-only planner diagnostics
+and EXPLAIN without ANALYZE, using a private physical backup of the benchmark
+cluster/statistics on socket55436 and identical planner settings. The first
+production exit is distinguished from independent analysis behind that exit.
+When no retained skeleton existed, diagnostic-only analysis continued with
+candidate admission disabled; its costs are counterfactual, not selected plans
+or performance measurements. All135 final diagnostic operator trees match the
+original automatic benchmark plans. No functional implementation change was
+made, and the diagnostic source/binary changes were restored; server55436 is
+stopped. Main optimized server55434 and benchmark artifacts are preserved.
+
+|Observed first gate/outcome|TPC-H22|JOB113|
+|---|---:|---:|
+|Single table: no join search|2 (Q1,Q6)|0|
+|Only parent-root/outer-join subquery region|1 (Q13)|0|
+|Two-relation complete region, below3-relation minimum|7|0|
+|SubLinks boundary|6|0|
+|No surviving serial SeqScan/HashPath fallback skeleton|5|93|
+|GEQO bypasses standard-search integration|0|20|
+|Actual generated candidate loses path competition|1 (Q3)|0|
+
+These are first-exit categories, not mutually exclusive SQL properties. For
+example, some two-relation TPC-H queries also have SubLinks/special joins.
+GEQO JOB regions have12–17 relations;29a/b/c additionally exceed the16-relation
+cap. All JOB winners use indexes;42/113 also use parallel plans. TPC-H winners
+use indexes18/22 and parallel plans19/22 (these method counts overlap).
+
+The early fallback gate masks later analysis. Of the five TPC-H skeleton
+exits, Q5 fails GYO, Q7 has a cross-relation residual, and Q8/Q9/Q10 pass those
+checks. Their cheapest diagnostic memory-eligible costs versus surviving
+native join costs are415,558.84/77,724.01,450,686.94/45,855.28, and
+273,916.40/194,172.83 respectively. These were never admitted candidates.
+
+Of JOB's93 skeleton exits,90 pass the subsequent semantic/EC/GYO checks;
+21 predict batching for every root, and69 have at least one memory-eligible
+counterfactual tree. Three others (15a/b/c) stop earlier on path availability:
+alias`at` (`aka_title`) has only IndexPaths left, including an unparameterized
+IndexScan, no serial SeqScan. This is not a semantic or GYO rejection. Across
+those69 diagnostic cost comparisons, cheapest Diamond/native cost ratios are
+4.83–504.60, median85.48; none is below the surviving native reference. Examples:
+JOB1a251,763.56 versus19,540.16 (12.88x),15d858,840.89 versus177,988.62 (4.83x),
+6c1,909,184.40 versus3,783.60 (504.60x). Do not describe any of these as actual
+planner cost losses: the production gate exits before creating a candidate.
+
+TPC-H Q3 is the sole actual generated candidate: total355,914.23,
+startup52,541.97. The serial native HashPath costs257,409.81 overall; a native
+NestLoop path costs278,887.56 with startup5,845.31, dominating the candidate
+in both startup and total cost, and `add_path` removes it. Other two GYO roots
+predict a two-batch build of the filtered3,259,996-row lineitem input at the
+128MiB hash allowance. Predicted batching is separate from cost competition.
+The final winning plan uses native parallel/index alternatives.
+
+Conclusion: zero coverage is mostly a conservative integration/path-survivor
+limitation, not evidence that all135 queries were costed and Diamond lost, nor
+that the operators cannot help. The documented complete-region, parent-root,
+GEQO and retained skeleton restrictions are working as implemented. Costs
+remain heuristic; this trace does not establish miscalibration or a semantic
+execution defect. Even relaxing the skeleton gate alone would not make these
+counterfactual trees cheapest under the current model. No scope broadening,
+forced choices or performance reruns were made to manufacture coverage.
+
+A future integration improvement should preserve an independently valid,
+fully expanded serial native fallback (including audited indexed/NestLoop/
+Merge inputs), rather than depend on a pure heap/hash survivor after pruning;
+construct required legal scan alternatives independently of the pruned base
+pathlist. Preserve parameter/security/lifetime guards and native competition,
+and add indexed-fallback/rescan/resource tests before enabling that wider scope.
+
+Evidence under `.work/diagnosis/`: `per-query.csv`, `report.json`,
+`trace-summary.json`, per-query JSON/logs, detailed15a/b/c path logs,
+`temporary-instrumentation.patch`, original source bytes/checksums and restored
+build/install/stop logs. `.work/diagnosis/trace.py` and `instrument.py` record
+the procedure; instrument.py is one-use and must not overwrite saved originals.
+Reproduction requires a fresh backup/temporary instrumentation; do not run it
+against source containing different uncommitted changes without reviewing it.
+
+## Retained nested-build validation (2026-10-31)
+
+After exec-state layout changes, `make -C "$diamond_work/build" clean` and
+`make -C "$diamond_work/build" -j4` with the existing header-dependent
+assertion/debug configuration passed. The first compile diagnosed the base's
+two-argument `heap_copy_minimal_tuple(tuple, extra)` API and a missing fixture
+makefuncs include; corrected without removing assertions. Reviewed the new
+expected-output diff before accepting it: 66-row EXCEPT ALL oracle true,
+whole-plan rewind performed, owner rescan rejected, initial multi-batch
+rejected, intentionally underestimated64 KiB storage hit the actual allocation
+limit, and a following fresh nested run returned66. Existing expectations
+were unchanged outside the added fixture.
+
+`make -C "$diamond_work/build/src/test/regress" check-tests
+TESTS=diamond_hashjoin` passed 1/1; `make -C "$diamond_work/build" check`
+passed all240. Evidence: `.work/build/nested-{clean,build,targeted,check}.log`.
+No new sanitizer/automatic-planner/optimized benchmark pass is claimed.
+
+
+## Cloud baseline recovery and remote batch (2026-10-31)
+
+The later user reply authorized local verified Debian packages after the
+system-install failure below. Extracted matching build/runtime packages under
+`scripts/diamond-pg/.work/tools`: bison, flex, m4, libicu-dev/libicu76,
+libreadline-dev/libreadline8t64, libncurses-dev/libtinfo6. apt downloads used
+signature-verified Debian trixie metadata; TLS and package checks stayed on.
+An initial link failure selected static ICU because runtime symlink targets
+were absent. Adding matching runtime packages fixed it; no source change.
+
+For this checkout, set `diamond_work="$PWD/scripts/diamond-pg/.work"` and:
+
+```sh
+export PATH="$diamond_work/tools/usr/bin:$diamond_work/install/bin:$PATH"
+export BISON_PKGDATADIR="$diamond_work/tools/usr/share/bison"
+export M4="$diamond_work/tools/usr/bin/m4"
+export LD_LIBRARY_PATH="$diamond_work/tools/usr/lib/x86_64-linux-gnu"
+export PKG_CONFIG_LIBDIR="$diamond_work/tools/usr/lib/x86_64-linux-gnu/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR="$diamond_work/tools"
+export CPPFLAGS="-I$diamond_work/tools/usr/include"
+export LDFLAGS="-L$diamond_work/tools/usr/lib/x86_64-linux-gnu"
+export TMPDIR="$diamond_work/build/scratch"
+export PG_REGRESS_SOCK_DIR="$diamond_work/s"
+```
+
+Section 2 configuration with these exports and `--enable-depend` passed.
+`make -j4`, `make -C src/test/regress check-tests TESTS=diamond_hashjoin`,
+`make check`, and `make install` passed. Targeted: 1/1; core: **240/240**.
+Evidence in `.work/build`: `configure.log`, `build.log`,
+`baseline-targeted.log`, `baseline-check.log`, `baseline-install.log`.
+These are fresh existing-Phase-3 checks on `9ee4d297b3`, not new optimizer tests.
+
+TPC-H source at `.work/tpch-dbgen`, revision
+`32f1c1b92d1664dba542e927d23d86ffa57aa253`, built with `make -j4 MACHINE=LINUX
+DATABASE=ORACLE WORKLOAD=TPCH CC=gcc`. `DSS_CONFIG="$PWD"
+DSS_PATH="$PWD/../tpch-sf1" ./dbgen -s 1` generated SF1. All eight tables
+loaded, with realistic PK/FK indexes; `.work/tpch-load.log` records counts.
+Queries use qgen defaults (`DSS_QUERY=queries ./qgen -d -s 1 N`), porting only
+Oracle rownum output to LIMIT and interval day(3) to PostgreSQL spelling.
+
+`.work/tpch-baseline.py` compares native against CURRENT ADJACENT Diamond:
+result bags first (warmup), then three alternating off/on repetitions,
+EXPLAIN ANALYZE BUFFERS JSON, medians, planning time and actual Diamond node
+coverage; 30s statement timeout, jit off, native indexes/planner choices kept.
+Assertion build; these are diagnostic results, not final optimized evaluation.
+Publication interrupted the first run after 11 queries. A detached batch is
+rerunning all 22; inspect `.work/remote-batch.log`, `.work/remote-batch.exit`
+and `.work/tpch-baseline/summary.json` before claiming completion. Earlier
+parser-failed outputs are retained separately and are not timings.
+JOB queries are at `.work/job`, revision
+`a39603662e023e449cb2121997a5034df9e02ebf`; batch downloads the standard
+May2013 archive from `https://event.cwi.nl/da/job/imdb.tgz` (1,263,193,115
+compressed bytes). Dataset download is not loaded/executed JOB evaluation.
+
+
+## Cloud attempt (2026-10-31; not a validation pass)
+
+On Debian 13, uid 1000, system Bison/Flex/m4 and ICU/readline headers are absent.
+There is no sudo/doas. `apt-get install -y bison flex m4 libicu-dev
+libreadline-dev`, through the execution tool's supported escalation, exited
+100: permission denied on `/var/lib/dpkg/lock-frontend`. An administrator must
+install section 1's packages (using root apt-get on this machine).
+
+From `scripts/diamond-pg/.work/build`, executed:
+
+```sh
+/workspace/postgres-diamond-hard-join/configure \
+  --prefix=/workspace/postgres-diamond-hard-join/scripts/diamond-pg/.work/install \
+  --enable-cassert --enable-debug --enable-depend > configure.log 2>&1
+```
+
+Exited 1: ICU pkg-config dependencies not found. Compiler probes passed;
+compilation, Diamond tests, sanitizer tests and benchmarks have not run.
+The log is ignored under the project `.work` path. No prior laptop results or
+earlier master-only 239-test onboarding results count as this branch's fresh
+validation. Do not use earlier workspace-local extracted build dependencies:
+the current request requires system-installed tools. RAM is 33 GiB and disk
+had about 59 GiB free at inspection; no benchmark data has been loaded.
+
+
 Updated 2026-10-25. Baseline: PostgreSQL 20devel,
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`.
 Use the native build tools below. Staging or committing is **not** required
@@ -505,3 +861,14 @@ Summaries and regression expectations are versioned; raw logs, plans, clusters
 and build outputs stay ignored under `scripts/diamond-pg/.work/` and must not
 be staged. No sanitizer/check-world/benchmark pass is claimed.
 [CHANGELOG.md](CHANGELOG.md) records changed files and implementation decisions.
+
+## Remote execution readiness (2026-10-31)
+
+After publication restored files, restarted the existing private database on
+port55434 and launched `.work/remote-batch.sh` using `nohup setsid`, with
+stdin closed and logs redirected. Verified its own session and PPID 1. This
+is detachment evidence, not a cloud lifetime guarantee. The sole authorized
+Codex worker used existing ChatGPT CLI login but failed before model work
+with proxy HTTP CONNECT 403 to chatgpt.com. Stopped its retries; no coding
+pass claimed. Status/evidence `.work/remote-worker.*`; a new network draft
+adds chatgpt.com but needs user application/publication. No proxy bypass.

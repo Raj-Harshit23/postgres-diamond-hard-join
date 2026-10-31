@@ -34,9 +34,9 @@ extern void ExecHashTableDetachBatch(HashJoinTable hashtable);
 extern void ExecParallelHashTableSetCurrentBatch(HashJoinTable hashtable,
 												 int batchno);
 
-extern void ExecHashTableInsert(HashJoinTable hashtable,
-								TupleTableSlot *slot,
-								uint32 hashvalue);
+extern HashJoinTuple ExecHashTableInsert(HashJoinTable hashtable,
+										 TupleTableSlot *slot,
+										 uint32 hashvalue);
 extern void ExecParallelHashTableInsert(HashJoinTable hashtable,
 										TupleTableSlot *slot,
 										uint32 hashvalue);

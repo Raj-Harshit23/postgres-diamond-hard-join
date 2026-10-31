@@ -91,6 +91,8 @@
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
+#include "executor/nodeLookupExpand.h"
+#include "nodes/value.h"
 #include "executor/nodeMemoize.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -6885,4 +6887,145 @@ compute_gather_rows(Path *path)
 	Assert(path->parallel_workers > 0);
 
 	return clamp_row_est(path->rows * get_parallel_divisor(path));
+}
+
+/* Estimate the actual preorder Expand work, including nested sidecar copies. */
+static Cost
+diamond_enumeration_cost(DiamondPath *path, int parent, double *rows,
+						 double *fanout, int *remaining, double final_rows)
+{
+	Cost		cost = 0;
+	ListCell   *lc;
+
+	foreach(lc, path->order)
+	{
+		int			child = lfirst_int(lc);
+		int			grandchildren = 0;
+		ListCell   *cell;
+		double		input;
+		double		output;
+		int			keys;
+
+		if (list_nth_int(path->parents, child) != parent)
+			continue;
+		foreach(cell, path->parents)
+			if (lfirst_int(cell) == child)
+			grandchildren++;
+		input = *rows;
+		output = Min(final_rows, input * fanout[child]);
+		keys = list_length(list_nth(path->clauses, child));
+
+		/*
+		 * Lookup checked the first match; use native hash costing's 0.5
+		 * average equality-evaluation factor for the remaining candidates.
+		 */
+		cost += output * cpu_tuple_cost +
+			Max(0.0, output - input) * keys * cpu_operator_cost * 0.5;
+		(*remaining)--;
+		/* Leaf sidecars are invariant while duplicates of one head drain. */
+		cost += (grandchildren ? output : input) *
+			(*remaining + grandchildren) * cpu_tuple_cost;
+		*remaining += grandchildren;
+		*rows = output;
+		cost += diamond_enumeration_cost(path, child, rows, fanout, remaining, final_rows);
+	}
+	return cost;
+}
+
+/*
+ * Diamond-PG: cost the fully expanded two-phase alternative in native CPU
+ * units. Head cardinalities shrink as each child is looked up; enumeration
+ * still pays for the complete result. Include hash/key work, owned probe
+ * copying, repeated Expand projection and live nested descriptors. This is a
+ * transparent estimate, not an assertion of residency: runtime builds check
+ * actual allocation and may choose the retained native plan before output.
+ * Predicted batching is left to ordinary native paths rather than pretending
+ * that deferred payloads can enter PostgreSQL batch files.
+ */
+bool
+cost_diamond_path(PlannerInfo *root, DiamondPath *path)
+{
+	int			n = list_length(path->base_paths);
+	double	   *heads = palloc_array(double, n);
+	double	   *fanout = palloc0_array(double, n);
+	int		   *payloads = palloc0_array(int, n);
+	Cost		scans = 0;
+	Cost		build = 0;
+	Cost		probe = 0;
+	Cost		copy = 0;
+	Cost		enumerate;
+	double		enumeration_rows;
+	int			remaining = 0;
+	double		live = 0;
+	ListCell   *lc;
+	int			i;
+	int			root_index = llast_int(path->order);
+
+	for (i = 0; i < n; i++)
+	{
+		Path	   *scan = list_nth(path->base_paths, i);
+
+		heads[i] = scan->rows;
+		scans += scan->total_cost;
+	}
+	foreach(lc, path->order)
+	{
+		int			child = lfirst_int(lc);
+		int			parent = list_nth_int(path->parents, child);
+		Path	   *scan = list_nth(path->base_paths, child);
+		List	   *clauses = list_nth(path->clauses, child);
+		double		selectivity;
+		SpecialJoinInfo sjinfo;
+		double		stored_width;
+		size_t		allowed;
+		int			buckets;
+		int			batches;
+		int			skew;
+
+		if (parent < 0)
+			continue;
+		init_dummy_sjinfo(&sjinfo,
+						  ((Path *) list_nth(path->base_paths, parent))->parent->relids,
+						  scan->parent->relids);
+		selectivity = clauselist_selectivity(root, clauses, 0, JOIN_INNER, &sjinfo);
+		fanout[child] = Max(1.0, heads[child] * selectivity);
+		probe += heads[parent] * (cpu_tuple_cost +
+								  2 * cpu_operator_cost * list_length(clauses));
+		build += heads[child] * (cpu_tuple_cost +
+								 cpu_operator_cost * list_length(clauses));
+		copy += heads[parent] * cpu_tuple_cost *
+			(1.0 + ((Path *) list_nth(path->base_paths, parent))->pathtarget->width / 128.0);
+		stored_width = scan->pathtarget->width + payloads[child] *
+			(sizeof(DiamondDeferredMatch) + scan->pathtarget->width + 32);
+		if (stored_width > INT_MAX / 2)
+			return false;
+		ExecChooseHashTableSize(heads[child], (int) stored_width, false,
+								false, 0, &allowed, &buckets, &batches, &skew);
+		if (batches != 1)
+			return false;
+		live += heads[child] * (stored_width + HJTUPLE_OVERHEAD + 32) +
+			buckets * sizeof(HashJoinTuple);
+		copy += heads[child] * payloads[child] * cpu_tuple_cost *
+			(1.0 + scan->pathtarget->width / 128.0);
+		heads[parent] *= Min(1.0, heads[child] * selectivity);
+		payloads[parent] += 1 + payloads[child];
+	}
+	foreach(lc, path->parents)
+		if (lfirst_int(lc) == root_index)
+		remaining++;
+	enumeration_rows = Min(path->path.rows, heads[root_index]);
+	enumerate = diamond_enumeration_cost(path, root_index, &enumeration_rows,
+										 fanout, &remaining, path->path.rows);
+	path->head_rows = NIL;
+	for (i = 0; i < n; i++)
+		path->head_rows = lappend(path->head_rows, makeFloat(psprintf("%.17g", heads[i])));
+	path->memory_estimate = live;
+	path->path.startup_cost = scans -
+		((Path *) list_nth(path->base_paths, root_index))->total_cost + build;
+	path->path.total_cost = scans + build + probe + copy +
+		enumerate +
+		path->path.pathtarget->cost.startup +
+		path->path.rows * path->path.pathtarget->cost.per_tuple;
+	path->path.startup_cost = Min(path->path.startup_cost, path->path.total_cost);
+	return true;
 }

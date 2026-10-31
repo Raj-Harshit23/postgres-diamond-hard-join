@@ -1442,6 +1442,9 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			pname = "Hash";		/* "Join" gets added by jointype switch */
 			sname = "Hash Join";
 			break;
+		case T_DiamondJoin:
+			pname = sname = "Diamond Join";
+			break;
 		case T_Lookup:
 			pname = sname = "Diamond Lookup";
 			break;
@@ -2198,6 +2201,13 @@ ExplainNode(PlanState *planstate, List *ancestors,
 			if (plan->qual)
 				show_instrumentation_count("Rows Removed by Filter", 2,
 										   planstate, es);
+			break;
+		case T_DiamondJoin:
+			ExplainPropertyFloat("Diamond Estimated Live Bytes", NULL,
+								 ((DiamondJoin *) plan)->memory_estimate, 0, es);
+			if (es->analyze)
+				ExplainPropertyBool("Diamond Runtime Fallback",
+									((DiamondJoinState *) planstate)->fallback, es);
 			break;
 		case T_Lookup:
 			show_upper_qual(((Lookup *) plan)->hashjoin.hashclauses,

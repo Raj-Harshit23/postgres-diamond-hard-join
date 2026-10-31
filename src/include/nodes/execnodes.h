@@ -2259,6 +2259,9 @@ typedef struct LookupState
 	uint64		generation;
 	List	   *deferred;
 	bool		has_deferred_input;
+	/* Diamond-PG: retained build snapshots outlive individual probe heads. */
+	bool		retain_for_build;
+	uint64		storage_generation;
 } LookupState;
 
 /*
@@ -2275,10 +2278,20 @@ typedef struct ExpandState
 	struct DiamondHashMatch *cursor;
 	TupleTableSlot *input_head;
 	TupleTableSlot *match_slot;
+	TupleTableSlot *retained_probe_slot;
+	bool		retained_match;
 	MemoryContext head_context;
 	List	   *deferred;
 	bool		have_head;
 } ExpandState;
+
+/* Diamond-PG: select one complete pipeline before exposing its first tuple. */
+typedef struct DiamondJoinState
+{
+	PlanState	ps;
+	bool		prepared;
+	bool		fallback;
+} DiamondJoinState;
 
 
 /* ----------------------------------------------------------------
@@ -2713,6 +2726,8 @@ typedef struct HashState
 
 	Tuplestorestate *null_tuple_store;	/* where to put null-keyed tuples */
 	bool		keep_null_tuples;	/* do we need to save such tuples? */
+	/* Diamond-PG: only a typed Lookup parent may retain deferred builds. */
+	bool		diamond_build_allowed;
 
 	/*
 	 * In a parallelized hash join, the leader retains a pointer to the

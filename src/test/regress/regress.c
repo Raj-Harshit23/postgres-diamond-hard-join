@@ -31,6 +31,7 @@
 #include "executor/executor.h"
 #include "executor/functions.h"
 #include "executor/instrument.h"
+#include "executor/nodeLookupExpand.h"
 #include "executor/spi.h"
 #include "executor/tstoreReceiver.h"
 #include "foreign/foreign.h"
@@ -38,6 +39,7 @@
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/supportnodes.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/readfuncs.h"
 #include "optimizer/optimizer.h"
@@ -196,6 +198,262 @@ test_diamond_deferred_plan(PG_FUNCTION_ARGS)
 		elog(ERROR, "Diamond test deferred operator row counts differ");
 	ExecutorEnd(qd);
 	FreeQueryDesc(qd);
+	dest->rDestroy(dest);
+	PG_RETURN_NULL();
+}
+
+/*
+ * Diamond-PG: remap the two projections needed by the nested-build fixture.
+ * mode 0 maps a parent build key through the child's expanded target list;
+ * mode 1 maps the final parent projection to (R,S) head plus deferred T.
+ * This is physical test construction only; shipping planning uses Paths.
+ */
+typedef struct DiamondNestedTestMap
+{
+	List	   *child_tlist;
+	int			root_columns;
+	bool		final_projection;
+} DiamondNestedTestMap;
+
+static Node *
+diamond_test_nested_var(Node *node, void *context)
+{
+	DiamondNestedTestMap *map = context;
+
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var		   *var = copyObject((Var *) node);
+		TargetEntry *tle;
+		Var		   *source;
+
+		if (var->varno != INNER_VAR)
+			return (Node *) var;
+		tle = get_tle_by_resno(map->child_tlist, var->varattno);
+		if (!tle || !IsA(tle->expr, Var))
+			elog(ERROR, "Diamond nested test requires column projections");
+		source = (Var *) tle->expr;
+		if (!map->final_projection && source->varno != OUTER_VAR)
+			elog(ERROR, "Diamond nested test key requires an expanded relation");
+		var->varattno = source->varattno;
+		if (map->final_projection && source->varno == OUTER_VAR)
+		{
+			var->varno = OUTER_VAR;
+			var->varattno += map->root_columns;
+		}
+		return (Node *) var;
+	}
+	return expression_tree_mutator(node, diamond_test_nested_var, context);
+}
+
+PG_FUNCTION_INFO_V1(test_diamond_nested_plan);
+
+/*
+ * Diamond-PG: build a real R -> (S -> T) pipeline from a native R HashJoin
+ * whose build is an adjacent S/T pair.  Pull T's Expand above the parent
+ * hash build; the retained S probes and T iterators must survive consuming
+ * every S head.  Execute, rewind and compare complete bags in SQL.  A true
+ * expire flag rescans the retained owner after one output; spill inflates
+ * only the enclosing build estimate and must fail before producing results.
+ */
+Datum
+test_diamond_nested_plan(PG_FUNCTION_ARGS)
+{
+	char	   *query = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	List	   *raw = pg_parse_query(query);
+	List	   *queries;
+	List	   *plans;
+	PlannedStmt *stmt;
+	HashJoin   *join;
+	Hash	   *hash;
+	Expand	   *child;
+	Lookup	   *child_lookup;
+	Lookup	   *lookup;
+	Expand	   *middle;
+	Expand	   *final;
+	List	   *head = NIL;
+	List	   *combined = NIL;
+	ListCell   *lc;
+	DiamondNestedTestMap map;
+	QueryDesc  *qd;
+	DestReceiver *dest;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	int			column = 0;
+
+	if (list_length(raw) != 1)
+		elog(ERROR, "Diamond nested test requires one SELECT");
+	queries = pg_analyze_and_rewrite_fixedparams(linitial_node(RawStmt, raw),
+												 query, NULL, 0, NULL);
+	plans = pg_plan_queries(queries, query, 0, NULL);
+	stmt = linitial_node(PlannedStmt, plans);
+	if (stmt->commandType != CMD_SELECT || !IsA(stmt->planTree, HashJoin))
+		elog(ERROR, "Diamond nested test requires native parent HashJoin");
+	join = (HashJoin *) stmt->planTree;
+	hash = castNode(Hash, innerPlan(join));
+	if (!IsA(outerPlan(hash), Expand))
+		elog(ERROR, "Diamond nested test requires expanded build");
+	child = (Expand *) outerPlan(hash);
+	child_lookup = castNode(Lookup, outerPlan(child));
+	if (join->join.joinqual || join->join.plan.qual ||
+		child->join.joinqual || child->join.plan.qual)
+		elog(ERROR, "Diamond nested test requires pure equijoins");
+	map.child_tlist = child->join.plan.targetlist;
+	map.root_columns = list_length(outerPlan(join)->targetlist);
+	map.final_projection = false;
+	/* Hash keys address its OUTER_VAR, but parent clauses use INNER_VAR. */
+	hash->hashkeys = (List *) diamond_test_head_key((Node *) hash->hashkeys,
+													map.child_tlist);
+	join->hashclauses = (List *) diamond_test_nested_var((Node *) join->hashclauses, &map);
+	outerPlan(hash) = (Plan *) child_lookup;
+
+	hash->plan.targetlist = copyObject(child_lookup->hashjoin.join.plan.targetlist);
+	if (PG_GETARG_BOOL(2))
+		outerPlan(hash)->plan_rows = 1000000;
+	else if (PG_GETARG_BOOL(3))
+		outerPlan(hash)->plan_rows = 1;
+	lookup = makeNode(Lookup);
+	lookup->hashjoin = *join;
+	NodeSetTag(lookup, T_Lookup);
+	lookup->hashjoin.join.plan.plan_node_id = 1000000;
+	lookup->hashjoin.join.plan.qual = NIL;
+	lookup->hashjoin.join.joinqual = NIL;
+	lookup->hashjoin.join.plan.initPlan = NIL;
+	foreach(lc, outerPlan(join)->targetlist)
+	{
+		TargetEntry *source = lfirst_node(TargetEntry, lc);
+		TargetEntry *tle = copyObject(source);
+
+		tle->expr = (Expr *) makeVarFromTargetEntry(OUTER_VAR, source);
+		head = lappend(head, tle);
+		combined = lappend(combined, copyObject(tle));
+		column++;
+	}
+	lookup->hashjoin.join.plan.targetlist = head;
+	foreach(lc, child_lookup->hashjoin.join.plan.targetlist)
+	{
+		TargetEntry *source = lfirst_node(TargetEntry, lc);
+		TargetEntry *tle = copyObject(source);
+
+		tle->expr = (Expr *) makeVarFromTargetEntry(INNER_VAR, source);
+		tle->resno = ++column;
+		combined = lappend(combined, tle);
+	}
+	middle = makeNode(Expand);
+	middle->join = join->join;
+	NodeSetTag(middle, T_Expand);
+	middle->join.plan.targetlist = combined;
+	middle->lookup_plan_id = 1000000;
+	middle->final = false;
+	outerPlan(middle) = (Plan *) lookup;
+	innerPlan(middle) = NULL;
+	final = makeNode(Expand);
+	final->join = child->join;
+	NodeSetTag(final, T_Expand);
+	map.final_projection = true;
+	final->join.plan.targetlist = (List *) diamond_test_nested_var(
+																   (Node *) join->join.plan.targetlist, &map);
+	final->lookup_plan_id = child->lookup_plan_id;
+	final->final = true;
+	outerPlan(final) = (Plan *) middle;
+	innerPlan(final) = NULL;
+	stmt->planTree = (Plan *) final;
+	stmt = (PlannedStmt *) stringToNode(nodeToString(copyObject(stmt)));
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+	dest = CreateTuplestoreDestReceiver();
+	SetTuplestoreDestReceiverParams(dest, rsinfo->setResult,
+									rsinfo->econtext->ecxt_per_query_memory,
+									false, rsinfo->setDesc,
+									"Diamond nested test result descriptor mismatch");
+	qd = CreateQueryDesc(stmt, query, GetActiveSnapshot(), InvalidSnapshot,
+						 dest, NULL, NULL, INSTRUMENT_ROWS);
+	ExecutorStart(qd, 0);
+	if (PG_GETARG_BOOL(1))
+	{
+		ExecutorRun(qd, ForwardScanDirection, 1);
+		ExecReScan((PlanState *) ((ExpandState *) qd->planstate)->owner);
+	}
+	ExecutorRun(qd, ForwardScanDirection, 0);
+	ExecutorRewind(qd);
+	tuplestore_clear(rsinfo->setResult);
+	ExecutorRun(qd, ForwardScanDirection, 0);
+	ExecutorFinish(qd);
+	ExecutorEnd(qd);
+	FreeQueryDesc(qd);
+	dest->rDestroy(dest);
+	PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(test_diamond_automatic_plan);
+
+/*
+ * Diamond-PG: round-trip an actually cost-selected automatic plan and execute
+ * its complete bag twice, including wrapper rescan. The resource variant
+ * changes only a physical sizing estimate after planning, forcing the native
+ * branch before the first result. It never forces planner selection.
+ */
+Datum
+test_diamond_automatic_plan(PG_FUNCTION_ARGS)
+{
+	char	   *query = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	List	   *raw = pg_parse_query(query);
+	List	   *queries;
+	List	   *plans;
+	PlannedStmt *stmt;
+	QueryDesc  *qd;
+	DestReceiver *dest;
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	bool		fallback = PG_GETARG_BOOL(1);
+	bool		low_memory = PG_GETARG_BOOL(2);
+	int			saved_work_mem = work_mem;
+
+	if (list_length(raw) != 1)
+		elog(ERROR, "Diamond automatic test requires one SELECT");
+	queries = pg_analyze_and_rewrite_fixedparams(linitial_node(RawStmt, raw),
+												 query, NULL, 0, NULL);
+	plans = pg_plan_queries(queries, query, 0, NULL);
+	stmt = linitial_node(PlannedStmt, plans);
+	if (stmt->commandType != CMD_SELECT || !IsA(stmt->planTree, DiamondJoin))
+		elog(ERROR, "Diamond automatic test requires a cost-selected Diamond plan");
+	if (fallback)
+	{
+		Plan	   *head = innerPlan(stmt->planTree);
+
+		while (IsA(head, Expand))
+			head = outerPlan(head);
+		Assert(IsA(head, Lookup));
+		outerPlan(innerPlan(head))->plan_rows = 1000000000;
+	}
+	stmt = (PlannedStmt *) stringToNode(nodeToString(copyObject(stmt)));
+	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+	dest = CreateTuplestoreDestReceiver();
+	SetTuplestoreDestReceiverParams(dest, rsinfo->setResult,
+									rsinfo->econtext->ecxt_per_query_memory,
+									false, rsinfo->setDesc,
+									"Diamond automatic test result descriptor mismatch");
+	qd = CreateQueryDesc(stmt, query, GetActiveSnapshot(), InvalidSnapshot,
+						 dest, NULL, NULL, INSTRUMENT_ROWS);
+	/* Model a cached plan executed with a smaller current memory budget. */
+	if (low_memory)
+		work_mem = 64;
+	PG_TRY();
+	{
+		ExecutorStart(qd, 0);
+		ExecutorRun(qd, ForwardScanDirection, 0);
+		ExecutorRewind(qd);
+		tuplestore_clear(rsinfo->setResult);
+		ExecutorRun(qd, ForwardScanDirection, 0);
+		if (((DiamondJoinState *) qd->planstate)->fallback != (fallback || low_memory))
+			elog(ERROR, "Diamond automatic runtime branch differs");
+		ExecutorFinish(qd);
+		ExecutorEnd(qd);
+		FreeQueryDesc(qd);
+	}
+	PG_FINALLY();
+	{
+		work_mem = saved_work_mem;
+	}
+	PG_END_TRY();
 	dest->rDestroy(dest);
 	PG_RETURN_NULL();
 }

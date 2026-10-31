@@ -24,7 +24,7 @@ begin
         lateral jsonb_array_elements(node->'Plans') child
     )
     select node from nodes where node->>'Node Type' in
-      ('Hash Join', 'Diamond Lookup', 'Diamond Expand');
+      ('Hash Join', 'Diamond Lookup', 'Diamond Expand', 'Diamond Join');
 end;
 $$;
 create table probe(id int, k int, x int);
@@ -842,4 +842,305 @@ select count(*) from test_deferred($q$
 $q$, 0, 0, false, true) as result(a int,b int,sa int,tb int);
 ERROR:  deferred Lookup input cannot cross hash batches
 rollback to savepoint spilling_stack;
+-- Retained nested build: S heads cross the parent hash build while T stays
+-- deferred. Text probe payloads, duplicates and NULLs survive input overwrite.
+set local work_mem = '16MB';
+set local hash_mem_multiplier = 1;
+create function test_nested(query text, expire boolean default false,
+                            spill boolean default false,
+                            underestimate boolean default false)
+returns setof record as :'regresslib', 'test_diamond_nested_plan'
+language c strict;
+create table nest_r as select i as a from generate_series(1,2000) i;
+create table nest_s(a int,b int,payload text);
+alter table nest_s alter column payload set storage plain;
+insert into nest_s select (i%40)+1,(i%40)+1,repeat(md5(i::text),128)
+  from generate_series(0,119) i;
+insert into nest_s values (null,20,'null parent key'),(20,null,'null child key');
+analyze nest_r, nest_s;
+set local diamond_independent_lookup_expand = off;
+create table nested_expected as
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a;
+set local diamond_independent_lookup_expand = on;
+create table nested_observed as select * from test_nested($q$
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a
+$q$) as result(a int,sa int,b int,payload text,tb int);
+select (select count(*) from nested_observed)=66 and not exists (
+  (table nested_expected except all table nested_observed)
+  union all
+  (table nested_observed except all table nested_expected)
+) as retained_nested_build_bag;
+ retained_nested_build_bag 
+---------------------------
+ t
+(1 row)
+
+savepoint expired_nested;
+select count(*) from test_nested($q$
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a
+$q$, true) as result(a int,sa int,b int,payload text,tb int);
+ERROR:  expired Diamond Lookup match
+rollback to savepoint expired_nested;
+savepoint spilling_nested;
+select count(*) from test_nested($q$
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a
+$q$, false, true) as result(a int,sa int,b int,payload text,tb int);
+ERROR:  retained Diamond build cannot cross hash batches
+rollback to savepoint spilling_nested;
+set local work_mem = '64kB';
+savepoint memory_nested;
+select count(*) from test_nested($q$
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a
+$q$, false, false, true) as result(a int,sa int,b int,payload text,tb int);
+ERROR:  retained Diamond build exceeds hash memory limit
+rollback to savepoint memory_nested;
+set local work_mem = '16MB';
+select count(*)=66 as usable_after_nested_errors from test_nested($q$
+  select r.a,s.a as sa,s.b,s.payload,t.b as tb from nest_r r
+  join (nest_s s join stack_t t on s.b=t.b) on r.a=s.a
+$q$) as result(a int,sa int,b int,payload text,tb int);
+ usable_after_nested_errors 
+----------------------------
+ t
+(1 row)
+
+-- Automatic alternatives use normal native methods and compare fully
+-- expanded outputs. The opt-in adds candidates; cheap native plans still win.
+set local diamond_independent_lookup_expand = off;
+set local diamond_lookup_expand = off;
+set local enable_nestloop = on;
+set local enable_mergejoin = on;
+set local join_collapse_limit = 8;
+set local work_mem = '16MB';
+create function auto_same_rows(query text, expected_pairs int)
+returns boolean language plpgsql as $$
+declare
+  wrappers int;
+  lookups int;
+  expands int;
+  same_rows boolean;
+begin
+  perform set_config('diamond_acyclic','off',true);
+  execute 'create table auto_native_rows as ' || query;
+  perform set_config('diamond_acyclic','on',true);
+  select count(*) filter (where p->>'Node Type'='Diamond Join'
+                              and (p->>'Actual Loops')::int>0
+                              and p->>'Diamond Runtime Fallback'='false'),
+         count(*) filter (where p->>'Node Type'='Diamond Lookup'
+                              and (p->>'Actual Loops')::int>0),
+         count(*) filter (where p->>'Node Type'='Diamond Expand'
+                              and (p->>'Actual Loops')::int>0)
+  into wrappers,lookups,expands
+  from diamond_plan('create table auto_diamond_rows as ' || query) p;
+  select not exists (
+    (table auto_native_rows except all table auto_diamond_rows)
+    union all
+    (table auto_diamond_rows except all table auto_native_rows)
+  ) into same_rows;
+  drop table auto_native_rows,auto_diamond_rows;
+  return same_rows and wrappers=(expected_pairs>0)::int
+         and lookups=expected_pairs and expands=expected_pairs;
+end;
+$$;
+create table auto_root as select i%2 as a,i%2 as b from generate_series(1,400) i;
+create table auto_s as select i%2 as a from generate_series(1,40) i;
+create table auto_t as select i%2 as b from generate_series(1,40) i;
+analyze auto_root,auto_s,auto_t;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)',2) as automatic_star;
+ automatic_star 
+----------------
+ t
+(1 row)
+
+-- One equality class, despite three textual edges: not a genuine cycle.
+-- This ordered-join diagnostic exposes the alternative to native pruning;
+-- it is a classification test, not a performance comparison.
+set local join_collapse_limit=1;
+select auto_same_rows('select r.a,s.a as sa,t.a as ta from (auto_root r join auto_s s on r.a=s.a) join auto_s t on s.a=t.a and r.a=t.a',2) as redundant_equality_triangle;
+ redundant_equality_triangle 
+-----------------------------
+ t
+(1 row)
+
+set local join_collapse_limit=8;
+create table auto_a as select i%2 as a from generate_series(1,400) i;
+create table auto_b as select i%2 as a,i%2 as b from generate_series(1,40) i;
+create table auto_c as select i%2 as b,i%2 as c from generate_series(1,40) i;
+create table auto_d as select i%2 as c from generate_series(1,40) i;
+analyze auto_a,auto_b,auto_c,auto_d;
+select auto_same_rows('select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c)',3) as automatic_nested_chain;
+ automatic_nested_chain 
+------------------------
+ t
+(1 row)
+
+create table auto_h as select i%2 as a,i%2 as b,i%2 as c from generate_series(1,40) i;
+create table auto_l as select i%2 as a from generate_series(1,20) i;
+create table auto_m as select i%2 as b from generate_series(1,20) i;
+create table auto_n as select i%2 as c from generate_series(1,20) i;
+analyze auto_h,auto_l,auto_m,auto_n;
+select auto_same_rows('select a,b,c from auto_h join auto_l using(a) join auto_m using(b) join auto_n using(c)',3) as automatic_branch;
+ automatic_branch 
+------------------
+ t
+(1 row)
+
+-- Genuine cycle and unsupported expression/residual dependencies stay native.
+select auto_same_rows('select x.a,x.b,y.c from auto_b x join auto_c y on x.b=y.b join auto_h z on y.c=z.c and x.a=z.a',0) as genuine_cycle_native;
+ genuine_cycle_native 
+----------------------
+ t
+(1 row)
+
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s on r.a+1=s.a join auto_t t on r.b=t.b',0) as expression_key_native;
+ expression_key_native 
+-----------------------
+ t
+(1 row)
+
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b) where s.a<t.b',0) as cross_residual_native;
+ cross_residual_native 
+-----------------------
+ t
+(1 row)
+
+create table auto_small as select i as a,i as b from generate_series(1,4) i;
+analyze auto_small;
+select auto_same_rows('select x.a from auto_small x join auto_small y on x.a=y.a join auto_small z on x.b=z.b',0) as cheap_native_wins;
+ cheap_native_wins 
+-------------------
+ t
+(1 row)
+
+-- Copy/read and whole-plan rescan exercise an actually cost-selected plan.
+create function test_automatic(query text, fallback boolean default false,
+                               low_memory boolean default false)
+returns setof record as :'regresslib', 'test_diamond_automatic_plan'
+language c strict;
+create table auto_roundtrip as select * from test_automatic($q$
+  select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)
+$q$) as result(a int,sa int,b int);
+create table auto_fallback as select * from test_automatic($q$
+  select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)
+$q$,true) as result(a int,sa int,b int);
+select (select count(*) from auto_fallback)=160000 and not exists (
+  (table auto_roundtrip except all table auto_fallback)
+  union all
+  (table auto_fallback except all table auto_roundtrip)
+) as automatic_copy_rescan_native_fallback;
+ automatic_copy_rescan_native_fallback 
+---------------------------------------
+ t
+(1 row)
+
+insert into auto_root values (null,0),(0,null);
+insert into auto_s values (null);
+insert into auto_t values (null);
+analyze auto_root,auto_s,auto_t;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)',2) as automatic_null_duplicate_bag;
+ automatic_null_duplicate_bag 
+------------------------------
+ t
+(1 row)
+
+create table auto_text_root as select 'k'||(i%2)::text as k,i%2 as n from generate_series(1,400) i;
+create table auto_text_leaf as select 'k'||(i%2)::text as k,i%2 as n from generate_series(1,40) i;
+analyze auto_text_root,auto_text_leaf;
+select auto_same_rows('select r.k,s.n,t.k as tk from auto_text_root r join auto_text_leaf s on r.k=s.k and r.n=s.n join auto_text_leaf t on r.k=t.k and r.n=t.n',2) as automatic_text_multiple_keys;
+ automatic_text_multiple_keys 
+------------------------------
+ t
+(1 row)
+
+-- The final projection may depend on both sides and use immutable expressions.
+select auto_same_rows('select r.a+s.a as sum,t.b*2 as projected from auto_root r join auto_s s using(a) join auto_t t using(b) where r.a>=0',2) as automatic_projection_filter;
+ automatic_projection_filter 
+-----------------------------
+ t
+(1 row)
+
+set local plan_cache_mode=force_generic_plan;
+set local diamond_acyclic=on;
+prepare automatic_cached(int) as
+  select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)
+  where r.a >= $1;
+create table automatic_cache_plan as select p->>'Node Type' as kind
+  from diamond_plan('execute automatic_cached(0)',false) p;
+select exists(select from automatic_cache_plan where kind='Diamond Join') as automatic_cache_selected;
+ automatic_cache_selected 
+--------------------------
+ t
+(1 row)
+
+set local diamond_acyclic=off;
+select not exists (
+  (table automatic_cache_plan except all
+   select p->>'Node Type' from diamond_plan('execute automatic_cached(0)',false) p)
+  union all
+  (select p->>'Node Type' from diamond_plan('execute automatic_cached(0)',false) p
+   except all table automatic_cache_plan)
+) as automatic_cached_plan_stable;
+ automatic_cached_plan_stable 
+------------------------------
+ t
+(1 row)
+
+create table automatic_param0 as execute automatic_cached(0);
+create table automatic_param1 as execute automatic_cached(1);
+select (select count(*) from automatic_param0)=160000
+   and (select count(*) from automatic_param1)=80000 as automatic_parameters;
+ automatic_parameters 
+----------------------
+ t
+(1 row)
+
+deallocate automatic_cached;
+set local diamond_acyclic=on;
+-- A live automatically selected iterator must survive cursor shutdown, and
+-- a real timer cancellation must propagate rather than choosing fallback.
+set local cursor_tuple_fraction=1.0;
+declare automatic_forward no scroll cursor for
+  select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b);
+move forward 1 from automatic_forward;
+move forward 1 from automatic_forward;
+move all from automatic_forward;
+close automatic_forward;
+savepoint automatic_cancel;
+declare automatic_cancel_cursor no scroll cursor for
+  select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c);
+move forward 1 from automatic_cancel_cursor;
+set local statement_timeout='1ms';
+move all from automatic_cancel_cursor;
+ERROR:  canceling statement due to statement timeout
+rollback to savepoint automatic_cancel;
+set local statement_timeout=0;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)',2) as automatic_usable_after_cancel;
+ automatic_usable_after_cancel 
+-------------------------------
+ t
+(1 row)
+
+-- Runtime allocation, not just an estimate, can trigger the retained native
+-- branch. The C fixture plans at16MiB then executes the cached shape at64KiB.
+create table auto_memory_fallback as select * from test_automatic($q$
+  select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c)
+$q$,false,true) as result(a int,b int,c int);
+set local diamond_acyclic=off;
+select not exists (
+  (select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c)
+   except all table auto_memory_fallback)
+  union all
+  (table auto_memory_fallback except all
+   select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c))
+) as automatic_actual_memory_native_bag;
+ automatic_actual_memory_native_bag 
+------------------------------------
+ t
+(1 row)
+
 rollback;

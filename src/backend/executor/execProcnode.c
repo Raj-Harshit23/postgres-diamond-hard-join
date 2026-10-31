@@ -310,6 +310,9 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 													estate, eflags);
 			break;
 
+		case T_DiamondJoin:
+			result = (PlanState *) ExecInitDiamondJoin((DiamondJoin *) node, estate, eflags);
+			break;
 		case T_Lookup:
 			result = (PlanState *) ExecInitLookup((Lookup *) node, estate, eflags);
 			break;
@@ -686,6 +689,9 @@ ExecEndNode(PlanState *node)
 
 		case T_HashJoinState:
 			ExecEndHashJoin((HashJoinState *) node);
+			break;
+		case T_DiamondJoinState:
+			ExecEndDiamondJoin((DiamondJoinState *) node);
 			break;
 		case T_LookupState:
 			ExecEndLookup((LookupState *) node);

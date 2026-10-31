@@ -3116,6 +3116,7 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			break;
 
 		case T_ProjectSet:
+		case T_DiamondJoin:
 		case T_Material:
 		case T_Sort:
 		case T_IncrementalSort:

@@ -908,6 +908,7 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 				break;
 			}
 
+		case T_DiamondJoin:
 		case T_Material:
 		case T_Sort:
 		case T_IncrementalSort:
@@ -1370,7 +1371,9 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 	 * output/parameter sets and gives the additional Lookup a unique node ID.
 	 * No independent Path search or join scheduling is introduced here.
 	 */
-	if (IsA(plan, HashJoin))
+	if (IsA(plan, DiamondJoin))
+		return create_diamond_plan_references(root, plan);
+	if (IsA(plan, HashJoin) && !((HashJoin *) plan)->diamond_member)
 		return create_diamond_lookup_expand(root, (HashJoin *) plan);
 
 	return plan;

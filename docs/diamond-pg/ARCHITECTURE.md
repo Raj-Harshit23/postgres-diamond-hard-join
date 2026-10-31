@@ -1,8 +1,115 @@
-# Diamond-PG architecture and Phase 0 source map
+# Diamond-PG architecture
 
-Last updated: 2026-10-25. Phase 2 is committed. **Phase 3 adds separate
-Lookup/Expand execution nodes and owned deferred heads**, alongside the
-immediate path and native counters. Diamond Path search remains future work.
+Updated 2026-10-31 on `diamond-pg-cloud`, PostgreSQL20devel base
+`6296e78c3d2c7406bb450c5ae477b2fef58f155e`. This checkpoint preserves the tested bounded implementation.
+The source map and earlier phase descriptions below remain historical context;
+this section describes the current automatic implementation.
+
+The user subsequently requested paper Section4 integration and authorized
+normal commits/pushes with harshit as author/committer. That correction is the
+next milestone; this checkpoint implements the bounded Section3.4-style
+complete two-phase schedule, not the complete Section4 memo/boundary policy.
+
+## Automatic acyclic alternatives
+
+`allpaths.c:add_diamond_acyclic_path` runs after standard join search for a
+complete eligible3–16-relation inner-join region. Each relation is a hyperedge
+whose attributes are PostgreSQL EquivalenceClasses. GYO removes an ear only
+when one surviving parent contains all attributes shared with surviving
+relations. Same-EC redundant triangles are one attribute; genuine cycles have
+no ear. Each possible root is tried, with a bounded size-based ear/parent
+heuristic rather than exhaustive tree enumeration. EC-generated strict,
+same-type equalities carry native operator/collation semantics.
+
+Only a fully expanded `DiamondPath` enters ordinary `add_path` competition.
+It contains base scan Paths, parent/ear order, clauses, filtered-head estimates,
+live-memory estimate and a preserved serial native HashPath fallback. Native
+indexed, merge, nested-loop and parallel alternatives remain available.
+`costsize.c:cost_diamond_path` estimates native join selectivity, first-match
+head filtering, hash build/probe, owned probe and descriptor copies,
+preorder enumeration, projections and retained memory. Predicted batching
+rejects the alternative. Costs are heuristic; estimates are not residency
+proof or measured peak RSS. The developer GUC `diamond_acyclic` defaults off
+and adds candidates; it does not force selection or change cached plans.
+
+`createplan.c` first builds a canonical fully relational HashJoin tree with
+`diamond_member`/`diamond_head_rows` annotations. Ordinary reference fixing
+and parameter finalization run before `create_diamond_plan_references`
+factorizes it. Children build filtered heads with retained descriptors;
+preorder Expands expose each parent before its descendants. All scan columns
+remain available until final expansion, whose projection uses the canonical
+column mapping. Deferred heads do not cross ordinary SQL executor boundaries.
+
+`DiamondJoin`/`DiamondJoinState` retain two ordinary Plan arms: native and
+optimized. First pull initializes the choice: an internal, origin-checked
+resource signal (SQLSTATE DP001) may select native only before any output.
+After first output there is no restart. SQL errors, cancellation and OOM
+propagate. Rescan reinitializes a failed optimized arm; generated node
+copy/read, executor dispatch/rescan/shutdown, setrefs/finalize, EXPLAIN/deparse
+and parallel boundaries include the wrapper. EXPLAIN reports live-byte estimate
+and actual native fallback, plus per-node rows/loops when analyzed.
+
+## Retained nested-build ownership
+
+Native SQL `HashJoinTuple` layout is unchanged. Private
+`HashJoinTableData.diamond_matches` indexes native tuple addresses in a
+batch-owned dynahash. Each retained `DiamondDeferredMatch` owns its probe
+MinimalTuple and validates its Lookup owner's `storage_generation`, separate
+from next-head generation. Build initialization pins contributing Lookup
+owners before pulling; actual multi-batch tables reject before descriptors
+escape. Retained tables cannot repartition or spill. Allocator totals include
+probe copies, sidecar map, native tuples/buckets and final bucket growth.
+Single-batch native builds have no skew table. Ordinary native batching/skew
+paths retain their behavior.
+
+Expand resolves owners through typed outer chains and nested Hash build
+branches, restores owned probes into its own MinimalTuple slot, and imports
+the selected build tuple's nested descriptors. Private iterator copies preserve
+duplicate multiplicity; invariant leaf sidecars are reused while draining
+matches. Rescan/end invalidate epochs before cleanup. No process pointer is
+stored as a SQL Datum or raw spill payload; parallel/materialized ordinary
+consumers require full expansion.
+
+## Current eligibility and limits
+
+Complete standard-search regions only: regular heap scans, simple-column
+strict same-type hash equality ECs, immutable base filters and a retained
+serial heap/hash native skeleton. No parent-root/subplan boundary, live
+special/outer/lateral/security join, row locking, DML, placeholder or target
+SRF. Cross-relation residuals (including distributed one-time pseudoconstant
+filters), expression keys, unsupported access methods,
+GEQO/hook search and genuine cycles remain native. Upper ordinary projection
+and aggregate processing sees fully expanded tuples. There is no Expand3,
+eager aggregation, outer-join reordering or deferred spill implementation.
+
+Current assertion/debug focused 1/1 and core 240/240 pass. Optimized TPC-H/JOB/
+exact paper acyclic evaluation is complete. TPC-H/JOB select no Diamond.
+Scaled paper N1000/5000 automatically execute 219.6x/907.6x faster by shrinking
+heads before enumeration; full N50000 automatic median is23.877ms, while native exceeds 120s; no paired
+full-size speedup ratio is claimed. Annotated Valgrind focused SQL also passes1/1 plus partial-cursor cleanup.
+Native startup/scanner leaks and relcache/WAL uninitialized writes remain
+unsuppressed; no invalid access was reported and no clean memory pass is claimed.
+[TESTING.md](TESTING.md) records current evidence and commands;
+[EXECPLAN.md](EXECPLAN.md) records the live restart checkpoint.
+
+## Observed planner-coverage limitation
+
+The follow-up trace of all135 benchmark queries shows that the retained
+fallback search runs on already-pruned final `joinrel->pathlist`, before the
+semantic/EC/GYO checks. Requiring a recursively pure SeqScan/HashPath survivor
+blocks93 JOB queries;20 others use GEQO. Base SeqScan availability is also a
+pruning dependency (JOB15a/b/c). These are integration restrictions, not
+fundamental requirements of Lookup/Expand or proof of semantic ineligibility.
+Only TPC-H Q3 reaches real candidate costing and loses native path competition.
+Diagnostic analysis behind the fallback gate never admits candidates; its
+costs are counterfactual. TESTING.md gives exact counts, costs and evidence.
+No functional change or claim of a corrected cost model follows from this trace.
+
+## Historical source map and earlier phase checkpoints
+
+The sections below describe the baseline audit and prior milestones. Their
+branch/status/future-work statements refer to those earlier dates; the
+current contract and restrictions above supersede them.
 
 ## Reproducible base and audit scope
 

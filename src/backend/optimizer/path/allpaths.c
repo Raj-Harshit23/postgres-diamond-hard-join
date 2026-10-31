@@ -16,9 +16,15 @@
 #include "postgres.h"
 
 #include <limits.h>
+#include <float.h>
 #include <math.h>
 
 #include "access/sysattr.h"
+#include "access/stratnum.h"
+#include "catalog/pg_am_d.h"
+#include "catalog/pg_type_d.h"
+#include "executor/nodeLookupExpand.h"
+#include "optimizer/restrictinfo.h"
 #include "access/tsmapi.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_operator.h"
@@ -3942,6 +3948,252 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
  * than one join-order search, you'll probably need to save and restore the
  * original states of those data structures.  See geqo_eval() for an example.
  */
+/*
+ * Diamond-PG: keep a serial native fallback whose child contracts are known.
+ * Native indexed, merge and parallel alternatives still compete normally;
+ * this prototype adds an alternative only when a serial heap/hash skeleton
+ * remains available. Parameterized and arbitrary executor boundaries stay native.
+ */
+static bool
+diamond_native_tree(Path *path)
+{
+	if (path->param_info || path->parallel_aware)
+		return false;
+	if (IsA(path, Path) && path->pathtype == T_SeqScan)
+		return true;
+	if (IsA(path, HashPath))
+	{
+		HashPath   *hash = (HashPath *) path;
+
+		return hash->jpath.jointype == JOIN_INNER &&
+			diamond_native_tree(hash->jpath.outerjoinpath) &&
+			diamond_native_tree(hash->jpath.innerjoinpath);
+	}
+	return false;
+}
+
+/*
+ * Diamond-PG: build relation hyperedges from PostgreSQL EquivalenceClasses,
+ * not textual equality edges. GYO removes an ear when all attributes shared
+ * with the remaining relations occur in one parent. Equalities such as
+ * R.a=S.a=T.a are one attribute, so redundant triangles do not become cycles.
+ * A true R(a,b),S(b,c),T(c,a) cycle has no removable ear and stays native.
+ *
+ * This is a bounded extra alternative for a complete, legal inner-join region.
+ * Only the fully expanded result enters add_path; private heads are never
+ * compared as if they were ordinary relational results. No query is rewritten.
+ */
+static void
+add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	int			n = bms_num_members(joinrel->relids);
+	int			nec = list_length(root->eq_classes);
+	RelOptInfo **rels;
+	Bitmapset **attrs;
+	Bitmapset  *active;
+	Var		 ***members;
+	EquivalenceClass **classes;
+	DiamondPath *diamond;
+	DiamondPath *template;
+	HashPath   *native;
+	int			preferred_root;
+	Path	   *fallback = NULL;
+	ListCell   *lc;
+	int			i;
+	int			e;
+	int			rti = -1;
+
+	if (!diamond_acyclic || n < 3 || n > 16 || root->parent_root ||
+		!bms_equal(joinrel->relids, root->all_baserels) ||
+		root->parse->commandType != CMD_SELECT || root->parse->hasModifyingCTE ||
+		root->parse->hasSubLinks || root->parse->hasRowSecurity ||
+		root->parse->hasTargetSRFs || root->parse->rowMarks ||
+		root->join_info_list || root->placeholder_list || root->hasLateralRTEs)
+		return;
+	foreach(lc, joinrel->pathlist)
+	{
+		Path	   *path = lfirst(lc);
+
+		if (diamond_native_tree(path) &&
+			(!fallback || path->total_cost < fallback->total_cost))
+			fallback = path;
+	}
+	if (!fallback)
+		return;
+	rels = palloc_array(RelOptInfo *, n);
+	attrs = palloc0_array(Bitmapset *, n);
+	members = palloc0_array(Var **, nec);
+	classes = palloc0_array(EquivalenceClass *, nec);
+	diamond = makeNode(DiamondPath);
+	diamond->path.pathtype = T_DiamondJoin;
+	diamond->path.parent = joinrel;
+	diamond->path.pathtarget = joinrel->reltarget;
+	diamond->path.rows = joinrel->rows;
+	diamond->path.disabled_nodes = fallback->disabled_nodes;
+	for (i = 0; i < n; i++)
+	{
+		RangeTblEntry *rte;
+		Path	   *scan = NULL;
+		ListCell   *cell;
+
+		rti = bms_next_member(joinrel->relids, rti);
+		rels[i] = root->simple_rel_array[rti];
+		rte = planner_rt_fetch(rti, root);
+		if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_RELATION ||
+			rte->securityQuals || get_rel_relam(rte->relid) != HEAP_TABLE_AM_OID ||
+			rels[i]->joininfo || rels[i]->lateral_relids)
+			return;
+		foreach(cell, rels[i]->baserestrictinfo)
+			if (lfirst_node(RestrictInfo, cell)->security_level != 0 ||
+				contain_mutable_functions((Node *) lfirst_node(RestrictInfo, cell)->clause))
+			return;
+		foreach(cell, rels[i]->reltarget->exprs)
+		{
+			Var		   *var = lfirst(cell);
+
+			if (!IsA(var, Var) || var->varno != rti || var->varattno <= 0)
+				return;
+		}
+		foreach(cell, rels[i]->pathlist)
+		{
+			Path	   *path = lfirst(cell);
+
+			if (path->pathtype == T_SeqScan && !path->param_info &&
+				!path->parallel_aware && (!scan || path->total_cost < scan->total_cost))
+				scan = path;
+		}
+		if (!scan)
+			return;
+		diamond->base_paths = lappend(diamond->base_paths, scan);
+		diamond->parents = lappend_int(diamond->parents, -1);
+		diamond->clauses = lappend(diamond->clauses, NIL);
+	}
+	e = 0;
+	foreach(lc, root->eq_classes)
+	{
+		EquivalenceClass *ec = lfirst_node(EquivalenceClass, lc);
+		ListCell   *cell;
+		Bitmapset  *participants = NULL;
+
+		if (ec->ec_merged || ec->ec_has_volatile || ec->ec_broken ||
+			ec->ec_max_security > 0)
+			continue;
+		members[e] = palloc0_array(Var *, n);
+		classes[e] = ec;
+		foreach(cell, ec->ec_members)
+		{
+			EquivalenceMember *em = lfirst_node(EquivalenceMember, cell);
+			Var		   *var = (Var *) em->em_expr;
+
+			if (em->em_is_child || !IsA(var, Var) || var->varlevelsup || var->varattno <= 0)
+				continue;
+			for (i = 0; i < n; i++)
+				if (var->varno == rels[i]->relid)
+				{
+					if (members[e][i] && !equal(members[e][i], var))
+						return;
+					members[e][i] = var;
+					participants = bms_add_member(participants, i);
+				}
+		}
+		if (bms_num_members(participants) >= 2)
+			for (i = 0; i < n; i++)
+				if (members[e][i])
+					attrs[i] = bms_add_member(attrs[i], e);
+		e++;
+	}
+	template = diamond;
+	/* Preserve the native top before any add_path call can prune it. */
+	native = palloc_object(HashPath);
+	memcpy(native, fallback, sizeof(HashPath));
+	fallback = (Path *) native;
+	for (preferred_root = 0; preferred_root < n; preferred_root++)
+	{
+		diamond = makeNode(DiamondPath);
+		*diamond = *template;
+		diamond->parents = list_copy(template->parents);
+		diamond->clauses = list_copy(template->clauses);
+		active = bms_add_range(NULL, 0, n - 1);
+		while (bms_num_members(active) > 1)
+		{
+			int			ear = -1;
+			int			parent = -1;
+			double		best = DBL_MAX;
+
+			for (i = 0; i < n; i++)
+			{
+				Bitmapset  *others = NULL;
+				Bitmapset  *shared;
+				int			j;
+
+				if (i == preferred_root || !bms_is_member(i, active))
+					continue;
+				for (j = 0; j < n; j++)
+					if (j != i && bms_is_member(j, active))
+						others = bms_add_members(others, attrs[j]);
+				shared = bms_intersect(attrs[i], others);
+				if (bms_is_empty(shared))
+					return;		/* no cross products in this hash-only
+								 * alternative */
+				for (j = 0; j < n; j++)
+					if (j != i && bms_is_member(j, active) && bms_is_subset(shared, attrs[j]) &&
+						rels[i]->rows * (rels[i]->reltarget->width + 1) < best)
+					{
+						ear = i;
+						parent = j;
+						best = rels[i]->rows * (rels[i]->reltarget->width + 1);
+					}
+			}
+			if (ear < 0)
+				return;			/* genuine cycle: no safe two-phase plan */
+
+			/*
+			 * Integer lists use int_value, not the pointer List
+			 * representation.
+			 */
+			list_nth_cell(diamond->parents, ear)->int_value = parent;
+			diamond->order = lappend_int(diamond->order, ear);
+			active = bms_del_member(active, ear);
+			for (i = 0; i < e; i++)
+				if (members[i] && members[i][ear] && members[i][parent] &&
+					bms_is_member(i, attrs[ear]) && bms_is_member(i, attrs[parent]))
+				{
+					Var		   *left = members[i][parent];
+					Var		   *right = members[i][ear];
+					Oid			op = InvalidOid;
+					ListCell   *family;
+					Expr	   *clause;
+
+					if (left->vartype != right->vartype)
+						return;
+					foreach(family, classes[i]->ec_opfamilies)
+					{
+						op = get_opfamily_member(lfirst_oid(family), left->vartype,
+												 right->vartype, BTEqualStrategyNumber);
+						if (OidIsValid(op) && op_hashjoinable(op, left->vartype) && op_strict(op))
+							break;
+						op = InvalidOid;
+					}
+					if (!OidIsValid(op))
+						return;
+					clause = make_opclause(op, BOOLOID, false,
+										   (Expr *) copyObject(left), (Expr *) copyObject(right),
+										   InvalidOid, classes[i]->ec_collation);
+					lfirst(list_nth_cell(diamond->clauses, ear)) =
+						lappend(list_nth(diamond->clauses, ear), make_simple_restrictinfo(root, clause));
+				}
+		}
+		diamond->order = lappend_int(diamond->order, bms_singleton_member(active));
+		if (!cost_diamond_path(root, diamond))
+			continue;
+		elog(DEBUG1, "Diamond acyclic cost %.2f versus native hash cost %.2f",
+			 diamond->path.total_cost, fallback->total_cost);
+		diamond->fallback = fallback;
+		add_path(joinrel, (Path *) diamond);
+	}
+	set_cheapest(joinrel);
+}
+
 RelOptInfo *
 standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 {
@@ -4049,6 +4301,7 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 	rel = (RelOptInfo *) linitial(root->join_rel_level[levels_needed]);
 
 	root->join_rel_level = NULL;
+	add_diamond_acyclic_path(root, rel);
 
 	return rel;
 }

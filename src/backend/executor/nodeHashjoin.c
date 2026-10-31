@@ -170,6 +170,7 @@
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeLookupExpand.h"
 #include "miscadmin.h"
 #include "parser/parsetree.h"
 #include "utils/lsyscache.h"
@@ -401,11 +402,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel, bool lookup_only)
 				 * reject a spilling physical stack before it can expose any
 				 * result.
 				 */
-				if (lookup_only && ((LookupState *) node)->has_deferred_input &&
+				if (lookup_only && (((LookupState *) node)->has_deferred_input ||
+									((LookupState *) node)->retain_for_build) &&
 					hashtable->nbatch != 1)
+				{
+					if (((LookupState *) node)->retain_for_build ||
+						((Lookup *) node->js.ps.plan)->hashjoin.diamond_member)
+						ExecDiamondResourceError("deferred Lookup input cannot cross hash batches");
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("deferred Lookup input cannot cross hash batches")));
+				}
 
 				/*
 				 * Reset OuterNotEmpty for scan.  (It's OK if we fetched a

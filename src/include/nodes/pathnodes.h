@@ -2493,6 +2493,24 @@ typedef struct HashPath
 } HashPath;
 
 /*
+ * Diamond-PG: a fully expanded acyclic alternative. Internal deferred heads
+ * never participate in ordinary add_path comparisons. parents/order encode a
+ * GYO join tree; clauses uses PostgreSQL EC equality semantics for each ear.
+ * The private native fallback is retained independently of path pruning.
+ */
+typedef struct DiamondPath
+{
+	Path		path;
+	Path	   *fallback;
+	List	   *base_paths;
+	List	   *parents;		/* integer indices, -1 for the root */
+	List	   *order;			/* GYO removal order, root last */
+	List	   *clauses;		/* one equality RestrictInfo list per base */
+	List	   *head_rows;		/* Float nodes: shrinking head estimates */
+	double		memory_estimate;
+} DiamondPath;
+
+/*
  * ProjectionPath represents a projection (that is, targetlist computation)
  *
  * Nominally, this path node represents using a Result plan node to do a

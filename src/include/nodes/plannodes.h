@@ -1073,6 +1073,9 @@ typedef struct HashJoin
 	 * perform lookups in the hashtable over the inner plan.
 	 */
 	List	   *hashkeys;
+	/* Diamond-PG: canonical acyclic subtree, transformed after setrefs. */
+	bool		diamond_member;
+	double		diamond_head_rows;	/* canonical head, not expanded join rows */
 } HashJoin;
 
 /*
@@ -1098,6 +1101,17 @@ typedef struct Expand
 	int			lookup_plan_id;
 	bool		final;
 } Expand;
+
+/*
+ * Diamond-PG: both children implement the identical fully expanded target.
+ * left is the retained native alternative; right is the factorized pipeline.
+ * Runtime memory rejection may select native only before the first output.
+ */
+typedef struct DiamondJoin
+{
+	Plan		plan;
+	double		memory_estimate;
+} DiamondJoin;
 
 /* ----------------
  *		materialization node

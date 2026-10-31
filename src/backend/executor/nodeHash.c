@@ -35,6 +35,7 @@
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeLookupExpand.h"
 #include "miscadmin.h"
 #include "port/pg_bitutils.h"
 #include "utils/lsyscache.h"
@@ -152,6 +153,7 @@ MultiExecPrivateHash(HashState *node)
 	 */
 	outerNode = outerPlanState(node);
 	hashtable = node->hashtable;
+	ExecDiamondHashBuildStart(node);
 
 	/*
 	 * set expression context
@@ -187,7 +189,8 @@ MultiExecPrivateHash(HashState *node)
 			uint32		hashvalue = DatumGetUInt32(hashdatum);
 			int			bucketNumber;
 
-			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
+			bucketNumber = hashtable->diamond_matches ? INVALID_SKEW_BUCKET_NO :
+				ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
 			{
 				/* It's a skew tuple, so put it into that hash table */
@@ -197,7 +200,10 @@ MultiExecPrivateHash(HashState *node)
 			else
 			{
 				/* Not subject to skew optimization, so insert normally */
-				ExecHashTableInsert(hashtable, slot, hashvalue);
+				HashJoinTuple tuple = ExecHashTableInsert(hashtable, slot, hashvalue);
+
+				if (hashtable->diamond_matches)
+					ExecDiamondHashBuildStore(node, tuple);
 			}
 			hashtable->totalTuples += 1;
 		}
@@ -223,6 +229,7 @@ MultiExecPrivateHash(HashState *node)
 
 	/* Report total number of tuples output (but not those discarded) */
 	hashtable->reportTuples = hashtable->totalTuples + nullTuples;
+	ExecDiamondHashBuildCheck(hashtable);
 }
 
 /* ----------------------------------------------------------------
@@ -519,6 +526,7 @@ ExecHashTableCreate(HashState *state)
 	 * subsidiary hashCxt, batchCxt or spillCxt.
 	 */
 	hashtable = palloc_object(HashJoinTableData);
+	hashtable->diamond_matches = NULL;
 	hashtable->nbuckets = nbuckets;
 	hashtable->nbuckets_original = nbuckets;
 	hashtable->nbuckets_optimal = nbuckets;
@@ -1063,6 +1071,10 @@ ExecHashIncreaseNumBatches(HashJoinTable hashtable)
 	long		ninmemory;
 	long		nfreed;
 	HashMemoryChunk oldchunks;
+
+	/* Diamond-PG: native files cannot represent retained executor sidecars. */
+	if (hashtable->diamond_matches)
+		ExecDiamondResourceError("retained Diamond build cannot cross hash batches");
 
 	/* do nothing if we've decided to shut off growth */
 	if (!hashtable->growEnabled)
@@ -1772,8 +1784,12 @@ ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable)
  * tuples from batch files.  We could save some cycles in the regular-tuple
  * case by not forcing the slot contents into minimal form; not clear if it's
  * worth the messiness required.
+ *
+ * Diamond-PG: return the inserted address for a pinned, single-batch retained
+ * build. Ordinary callers ignore it: batch growth may have moved the tuple,
+ * so the return value must not be dereferenced without that pinned contract.
  */
-void
+HashJoinTuple
 ExecHashTableInsert(HashJoinTable hashtable,
 					TupleTableSlot *slot,
 					uint32 hashvalue)
@@ -1782,6 +1798,7 @@ ExecHashTableInsert(HashJoinTable hashtable,
 	MinimalTuple tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);
 	int			bucketno;
 	int			batchno;
+	HashJoinTuple result = NULL;
 
 	ExecHashGetBucketAndBatch(hashtable, hashvalue,
 							  &bucketno, &batchno);
@@ -1801,6 +1818,7 @@ ExecHashTableInsert(HashJoinTable hashtable,
 		hashTupleSize = HJTUPLE_OVERHEAD + tuple->t_len;
 		hashTuple = (HashJoinTuple) dense_alloc(hashtable, hashTupleSize);
 
+		result = hashTuple;
 		hashTuple->hashvalue = hashvalue;
 		memcpy(HJTUPLE_MINTUPLE(hashTuple), tuple, tuple->t_len);
 
@@ -1858,6 +1876,7 @@ ExecHashTableInsert(HashJoinTable hashtable,
 
 	if (shouldFree)
 		heap_free_minimal_tuple(tuple);
+	return result;
 }
 
 /*

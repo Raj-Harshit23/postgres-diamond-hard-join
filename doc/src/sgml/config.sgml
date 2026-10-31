@@ -13020,6 +13020,38 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-acyclic" xreflabel="diamond_acyclic">
+      <term><varname>diamond_acyclic</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>diamond_acyclic</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: add experimental costed Lookup/Expand alternatives for
+        eligible acyclic inner equijoins. The default is <literal>off</literal>.
+        This setting takes effect during planning; cached plans retain their
+        chosen nodes. Ordinary native alternatives continue to compete.
+       </para>
+       <para>
+        The initial scope is complete standard-search regions of three to
+        sixteen regular heap relations with strict, same-type simple-column
+        equality keys and immutable base filters. Unsupported expressions,
+        join boundaries, parameterized inputs, parallel inputs and GEQO search
+        retain native behavior. Deferred hash storage must remain resident;
+        actual batch or memory rejection can choose a retained native branch
+        only before any result is returned.
+       </para>
+       <para>
+        <command>EXPLAIN</command> shows <literal>Diamond Join</literal>,
+        <literal>Diamond Lookup</literal> and <literal>Diamond Expand</literal>.
+        <command>EXPLAIN ANALYZE</command> reports runtime native fallback.
+        Cost and memory estimates are experimental and do not promise a
+        speedup. The older adjacent execution controls are independent.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-diamond-independent-lookup-expand" xreflabel="diamond_independent_lookup_expand">
       <term><varname>diamond_independent_lookup_expand</varname> (<type>boolean</type>)
       <indexterm>

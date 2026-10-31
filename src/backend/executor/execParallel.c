@@ -314,6 +314,7 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			ExecBitmapHeapInstrumentEstimate((BitmapHeapScanState *) planstate,
 											 e->pcxt);
 			break;
+		case T_DiamondJoinState:
 		case T_LookupState:
 		case T_ExpandState:
 			/* Diamond-PG: private head sidecars cannot enter a DSM plan. */

@@ -1,5 +1,97 @@
 # Diamond-PG changelog
 
+## 2026-10-31 - Authorized validated checkpoint before Section4 correction
+
+The user authorized normal commits/pushes on diamond-pg-cloud, with author and
+committer harshit <harshitraj969@gmail.com>, no co-author attribution. This
+checkpoint preserves the tested bounded acyclic implementation, reproducible
+runner, actual results and zero-coverage diagnosis. Proper paper Section4
+integration is the next requested milestone, excluding GEQO; no unfinished
+correction source is included. Remote publication is verified after commit.
+
+## 2026-10-31 - Explain zero benchmark coverage
+
+Traced all135 benchmark queries with temporary diagnostics on an isolated
+physical copy, separating first exits, semantic/GYO checks, path availability,
+predicted batching and actual cost pruning. JOB:93 missing pure serial
+heap/hash fallback survivors,20 GEQO bypasses; no real candidate costing.
+TPC-H: only Q3 generates a candidate, pruned by cheaper native alternatives.
+Counterfactual analysis does not admit paths or claim measured speed losses.
+All diagnostic native plan shapes match the benchmark. Source restored exactly,
+diagnostic server stopped, normal debug binary rebuilt. No functional/cost
+change, scope broadening, commit, publication or new performance claim.
+TESTING.md records complete counts/cost examples and `.work/diagnosis` evidence.
+
+## 2026-10-31 - Native automatic acyclic alternatives and safe selection
+
+Added `DiamondPath` and `DiamondJoin` plan/state, complete-region EC/GYO
+recognition with each-root scheduling, canonical reference fixing followed by
+nested Lookup/Expand factorization, native hash/selectivity-based heuristic
+costing, filtered-head sizing and retained native pre-output resource fallback.
+`diamond_acyclic` defaults off and adds cost competitors. Native indexed,
+parallel and other join methods remain available; unsupported regions stay
+native. Added dispatch, copy/read, rescan/parameter, EXPLAIN/deparse and parallel
+boundary integration, plus manual documentation for the developer control.
+
+Current-source focused 1/1 and full core 240/240 pass, including actually selected
+star/chain/branch cases, multiset comparisons, memory/batch fallback, copy/read,
+rewind, parameters, cached plans, cursor and cancellation. Complete standard
+JOB data and indexes loaded/analyzed; optimized same-binary/settings evaluation
+of all 22 TPC-H,113 JOB and exact paper acyclic scales completed. Added one
+reviewable benchmark runner under scripts/diamond-pg; raw data/plans stay ignored.
+TPC-H completed22/22 and JOB113/113 identical bags with no Diamond selection.
+Scaled exact paper N1000/5000 automatically execute 219.6x/907.6x faster; full
+N50000 automatic median 23.877ms/native 120s timeout (no paired ratio).
+Combined optimized suite wall time 1358.53s. Annotated Valgrind focused 1/1
+passed in 819.154s and an actually selected partial cursor closed/recovered.
+No invalid read/write/free/conditional-jump report; native startup/scanner
+leaks and relcache/WAL findings stay unsuppressed. Diagnostic server stopped.
+The initial strict Valgrind attempt stopped before SQL; the later annotated
+run above completed. No clean memory pass or real-suite Diamond gain claimed.
+Uncommitted changes only; no push, PR or environment publication.
+
+## 2026-10-31 - Retained nested-build execution groundwork
+
+Added a private batch-owned address-indexed sidecar map to native Hash builds,
+owned retained probe copies, independent storage epochs and pinned batch
+contracts. Actual allocator totals and final bucket-resize checks reject
+oversized retained builds before output. Native SQL tuple/spill layout stays
+unchanged. Expand resolves typed build owners and restores/propagates nested
+snapshots; the existing C regression module tests real R→(S→T) execution,
+rewind, text/NULL/duplicates, expiration, batching and actual memory exhaustion.
+Fresh focused 1/1 and all240 core regressions pass; no optimizer/cost selection
+or final benchmark claim. Changes remain uncommitted on diamond-pg-cloud.
+
+
+## 2026-10-31 - Isolated cloud branch and verified baseline
+
+Created `diamond-pg-cloud` from `9ee4d297b3` on user direction, without advancing
+`diamond-pg`. User authorized local verified Debian build dependencies after
+system installation failed. Added matching runtime libraries to resolve the
+static-ICU link failure. Fresh assertion/debug/header-dependent build passed;
+targeted Diamond 1/1 and core 240/240 passed; installation passed.
+
+Generated/loaded standard TPC-H SF1 into a separate indexed database. Prepared
+all 22 default-substitution queries with PostgreSQL syntax ports. Baseline
+runner compares native and existing adjacent execution, checks result bags,
+and retains interleaved timings/JSON plans. Publication interrupted the first
+run after 11 queries; detached batch reruns the suite and downloads standard
+JOB data. Paper and JOB access now work after publication. No PostgreSQL source
+changes, new optimizer, benchmark completion or speedup claimed. Updated the
+five documents; no commits/push/publication by the agent.
+
+
+## 2026-10-31 - Cloud midterm prerequisite checkpoint
+
+Fetched and selected existing remote `diamond-pg` at `9ee4d297b3`; confirmed
+pinned PostgreSQL base ancestry and clean source. Read required project docs
+and inspected typed sidecar ownership. No source, tests or costs changed.
+Updated the five existing documents with expanded authorization, accurate
+cloud build failure, missing system dependencies and precise restart steps.
+System package install failed for lack of OS privileges; default configure
+failed on ICU. No fresh Diamond tests or benchmarks ran. No commit/push/PR.
+
+
 File changes and reasons are recorded here; [TESTING.md](TESTING.md) owns
 runnable commands, observed results and evidence paths. Execution flow,
 ownership and paper mapping are in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -267,3 +359,12 @@ counters/execution, Diamond off/on tests, sanitizer runs or benchmarks existed.
 Phase 1's architecture was documented; its implementation awaited direction.
 The user subsequently committed this checkpoint as `7756e8e52e`:
 `diamond-pg: document architecture and validated baseline`. Nothing was pushed.
+
+## 2026-10-31 - Detached job and blocked coding handoff
+
+User authorized one remote coding worker, replacing the earlier prohibition
+for this one handoff. Created ignored handoff/status/log files; CLI worker
+startup was denied by proxy policy before model work. Stopped retries and
+saved a new additive chatgpt.com network requirement without publishing.
+Detached finite TPC-H/JOB preparation continues independently of the coding
+worker. Recorded precise restart instructions; no unattended guarantee.

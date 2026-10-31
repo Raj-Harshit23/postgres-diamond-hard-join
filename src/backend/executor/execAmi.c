@@ -251,6 +251,9 @@ ExecReScan(PlanState *node)
 		case T_HashJoinState:
 			ExecReScanHashJoin((HashJoinState *) node);
 			break;
+		case T_DiamondJoinState:
+			ExecReScanDiamondJoin((DiamondJoinState *) node);
+			break;
 		case T_LookupState:
 			ExecReScanLookup((LookupState *) node);
 			break;

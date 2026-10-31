@@ -1,27 +1,56 @@
 # Diamond-PG implementation plan
 
-Updated 2026-10-25. Base: `6296e78c3d2c7406bb450c5ae477b2fef58f155e`,
-PostgreSQL 20devel; local branch `diamond-pg`. ARCHITECTURE.md is the source
-map and design explanation; EXECPLAN.md is the session continuation guide.
+Updated 2026-10-31. Validated checkpoint on `diamond-pg-cloud`; original
+`diamond-pg` remains 9ee4d297b3. User authorization covers nested Phase 3,
+acyclic Phase 4, cost selection Phase 5 and relevant Phase 8 evaluation.
+Architecture and continuation details are in ARCHITECTURE.md and EXECPLAN.md.
 
-## Status and boundaries
+Next authorized milestone: integrate paper Section4 comparable minimized L&E
+states, boundary/early Expand alternatives and native composition, excluding
+GEQO. Decouple legal scan/fallback construction from pruned native survivors.
+No correction source is included in this checkpoint. User authorizes normal
+commits/pushes as harshit <harshitraj969@gmail.com>, without AI attribution.
 
-| Phase | Status | Deliverable / acceptance gate |
+## Current status and boundaries
+
+| Phase | Current status | Evidence / remaining gate |
 | --- | --- | --- |
-| 0: repository/paper mapping | Complete; system-package build, 239 regressions and runtime fixtures passed | Native planner/executor traces, paper mapping, invariants, tests, next-phase proposal; no functional changes |
-| 1: native instrumentation | Complete; build, all 240 regressions and two-worker runtime checks passed | Optional EXPLAIN counters with precise event semantics; native results/plans unchanged; serial/parallel/rescan tests |
-| 2: match representation | Complete, committed as c169183521; build, focused/240 tests and timeout/recovery passed; sanitizer execution blocked before SQL | First-match cursor with immediate Expand inside eligible serial inner HashJoins; native alternatives/fallback preserved |
-| 3: first-class operations | Bounded independent nodes validated, committed as 0aa87a8624; nested deferred builds outstanding | Independent Lookup/Expand execution with explicit head/handle transport and lifetime/materialization contracts |
-| 4: acyclic plans | Not started | Eligible alpha-acyclic inner-equijoin regions; legal paper-derived scheduling; native alternatives retained |
-| 5: cost and selection | Not started | Cost-based competition plus optional experimental controls; eligible does not mean forced |
-| 6: Expand3 | Not started | Correct three-relation cyclic equijoin using smaller-set iteration and secondary hashing |
-| 7: robustness extension | Not started | Documented intermediate-growth/memory/spill risk influences cost-based selection |
-| 8: evaluation | Not started | Reproducible local paper microbenchmarks/JOB/TPC-H, correctness, latency, planning and resource measurements |
+|0 mapping | Complete,7756e8e52e | Historical source map and paper mapping |
+|1 instrumentation | Complete,14ac927a8b | Native counters, serial/parallel regression coverage |
+|2 immediate Lookup/Expand | Complete,c169183521 | Prior focused/core passes; historical sanitizer startup blocker |
+|3 independent/nested ownership | Bounded implementation complete;0aa87a8624 plus this retained-build checkpoint | Owned probes, private sidecars, epochs, actual allocation/batch guards; nested/rewind/resource tests pass |
+|4 acyclic planning | Conservative native checkpoint | EC/GYO, each-root candidates, stars/chains/branching and redundant-EC tests pass; eligibility remains restricted |
+|5 costing/selection | Heuristic native cost competition and pre-output runtime fallback implemented | Selected and native-winning cases, actual-memory fallback, cached plans pass; performance calibration remains evidence-dependent |
+|6 Expand3 | Outside this milestone | No cyclic optimizer implemented |
+|7 robustness extension | Outside this milestone | Initial resident-storage safety/cost is implemented; general spill/risk calibration remains future work |
+|8 relevant evaluation | Benchmark attempts and feasible memory diagnostics complete | TPC-H22/22 and JOB113/113 bags agree, no Diamond selections; scaled paper219.6x/907.6x, full N50000 automatic 23.877ms/native 120s timeout |
 
-No functional milestone is considered validated until compilation and the
-applicable tests pass. The user installed system dependencies; Phase 0 now
-has a passing assertion/debug build, all 239 core regressions, and exact
-fixture/native hash-vs-non-hash result checks. See TESTING.md.
+Current-source assertion/debug/header-dependent build: focused 1/1 and full
+core 240/240 pass. Tests exercise actual selected plans rather than merely
+manual fixtures. Automatic scope is complete 3–16 plain-heap standard-search
+regions with strict simple-column EC equalities and immutable base filters;
+no live outer/lateral/security/locking/DML/subplan boundary. Native methods,
+indexes and parallel alternatives remain. Runtime rejection can select native
+only before any output; after output there is no restart. No general deferred
+spill, arbitrary expression/cross-residual scheduling or exhaustive join-tree
+search is implemented. Memory diagnostic startup failures remain visible.
+
+## Completed acceptance and explicit limitations
+
+1. Optimized attempts and result recording are complete; keep all native wins,
+   coverage limits and the full-size native paper timeout visible.
+2. Annotated focused 1/1 and partial-cursor close/recovery passed; no invalid
+   access reported. Native startup/scanner leak and relcache/WAL findings
+   remain unsuppressed: no clean memory pass is claimed.
+3. Full diff, formatting, source/benchmark identity and current docs reviewed;
+   checkpoint contains commands/evidence and an explicitly bounded scope.
+
+## Historical phase design and acceptance checklist
+
+The sections below preserve earlier plans/checkpoints. Their original
+"outstanding", "unauthorized" and "not started" claims are historical;
+the current status table above supersedes them. Future Phase6/7 design is
+outside the current implementation.
 
 ## Phase 0 evidence
 
@@ -118,12 +147,11 @@ copy/read, dispatch, deparse, parameter sets, rescans, shutdown and parallel
 boundaries are integrated. See ARCHITECTURE.md for structures/functions and
 TESTING.md for actual checks.
 
-Limits: only typed direct chains can carry sidecars; ordinary boundaries must
-be fully expanded. Production build inputs are direct heap scans. An internal
-deferred stack rejects batch spill before output. Nested deferred build payload
-storage remains outstanding; this milestone does not enable general chain/GYO
-plans. Resolve that contract before Phase 4's chain/nested-build acceptance.
-Phase 4 remains unauthorized.
+At the committed0aa87a checkpoint, production build inputs were direct heap
+scans and nested transport/planning remained outstanding. Current retained
+nested storage and automatic integration above supersede that restriction;
+ordinary consumers still require full expansion and retained builds remain
+resident. The user subsequently authorized Phase 4/5 and relevant evaluation.
 
 ## Phase 4: alpha-acyclic scheduling
 
@@ -202,15 +230,20 @@ Record execution/planning time, intermediate rows, observed operator memory,
 temp I/O, probes/emissions, and differential correctness. Never claim the
 paper's absolute-number reproduction on different hardware/configuration.
 
-## Decisions still requiring design review
+## Remaining design work beyond the bounded implementation
 
-1. Nested Lookup build storage and ownership across build materialization;
-   probe-head transport is implemented, not nested build transport.
-2. Deferred spill handling beyond the enforced single-batch stack restriction;
-   fully expanded boundaries currently protect ordinary native consumers.
-3. L&E optimizer state identity and path-pruning equivalence classes;
-   initial search scope and planning-time bound.
-4. Runtime batching/fallback strategy: estimates cannot guarantee no spill,
-   and restarting after emitting rows would duplicate results.
-5. Expand3 match counts/secondary indexes and duplicate semantics.
-6. Memory/risk calibration and benchmark scale on available hardware.
+1. Deferred spill beyond resident retained builds; no pointer payload may enter
+   native files, and output must never be duplicated by a late restart.
+2. Decouple retained serial native fallback and legal scan construction from
+   already-pruned pure heap/hash path survivors. The135-query trace shows93
+   JOB skeleton exits and20 GEQO bypasses; only TPC-H Q3 is an actual cost
+   loser. Any broader indexed/native fallback needs parameter/security/rescan/
+   resource tests and normal cost competition; diagnostic counterfactual costs
+   are not performance evidence. See TESTING.md.
+3. Better head-survival, copy/CPU and concurrent-live-memory calibration; native
+   statistics may badly misestimate correlated/skewed results. Current costs
+   are heuristic and work_mem is not a whole-query budget.
+4. Exhaustive/stronger tree/scheduling search beyond the bounded each-root GYO
+   heuristic, without comparing deferred heads to fully expanded relations.
+5. Expand3 match counts/secondary indexes and duplicate semantics, outside this
+   acyclic milestone.

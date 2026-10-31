@@ -225,4 +225,6 @@ extern double compute_bitmap_pages(PlannerInfo *root, RelOptInfo *baserel,
 								   Cost *cost_p, double *tuples_p);
 extern double compute_gather_rows(Path *path);
 
+extern bool cost_diamond_path(PlannerInfo *root, DiamondPath *path);
+
 #endif							/* COST_H */

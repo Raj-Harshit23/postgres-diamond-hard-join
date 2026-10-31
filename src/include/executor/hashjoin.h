@@ -332,6 +332,8 @@ typedef struct ParallelHashJoinState
 
 typedef struct HashJoinTableData
 {
+	/* Diamond-PG: private batch-owned sidecars; never part of SQL tuples. */
+	struct HTAB *diamond_matches;
 	int			nbuckets;		/* # buckets in the in-memory hash table */
 	int			log2_nbuckets;	/* its log2 (nbuckets must be a power of 2) */
 

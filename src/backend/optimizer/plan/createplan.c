@@ -120,6 +120,7 @@ static LockRows *create_lockrows_plan(PlannerInfo *root, LockRowsPath *best_path
 static ModifyTable *create_modifytable_plan(PlannerInfo *root, ModifyTablePath *best_path);
 static Limit *create_limit_plan(PlannerInfo *root, LimitPath *best_path,
 								int flags);
+static Plan *create_diamond_join_plan(PlannerInfo *root, DiamondPath *path);
 static SeqScan *create_seqscan_plan(PlannerInfo *root, Path *best_path,
 									List *tlist, List *scan_clauses);
 static SampleScan *create_samplescan_plan(PlannerInfo *root, Path *best_path,
@@ -422,6 +423,9 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 		case T_ForeignScan:
 		case T_CustomScan:
 			plan = create_scan_plan(root, best_path, flags);
+			break;
+		case T_DiamondJoin:
+			plan = create_diamond_join_plan(root, (DiamondPath *) best_path);
 			break;
 		case T_HashJoin:
 		case T_MergeJoin:
@@ -4382,6 +4386,254 @@ create_nestloop_plan(PlannerInfo *root,
 }
 
 /*
+ * Diamond-PG: create a canonical full relational tree from the GYO parent
+ * map. Native reference fixing runs before its internal factorization, so
+ * hash keys, output expressions and external references use normal rules.
+ * Every intermediate target retains the scan columns; expression evaluation
+ * happens at the ordinary fully expanded Result boundary above the tree.
+ */
+static Plan *
+diamond_canonical_plan(PlannerInfo *root, DiamondPath *path, int index)
+{
+	Plan	   *plan = create_plan_recurse(root,
+										   list_nth(path->base_paths, index), CP_EXACT_TLIST);
+	int			i;
+	ListCell   *ear;
+
+	check_stack_depth();
+	foreach(ear, path->order)
+	{
+		Plan	   *child;
+		Hash	   *hash;
+		HashJoin   *join;
+		SpecialJoinInfo sjinfo;
+		List	   *clauses;
+		List	   *operators = NIL;
+		List	   *collations = NIL;
+		List	   *outerkeys = NIL;
+		List	   *innerkeys = NIL;
+		List	   *tlist;
+		ListCell   *lc;
+		int			column = 0;
+
+		i = lfirst_int(ear);
+		if (list_nth_int(path->parents, i) != index)
+			continue;
+		child = diamond_canonical_plan(root, path, i);
+		clauses = extract_actual_clauses(list_nth(path->clauses, i), false);
+		foreach(lc, clauses)
+		{
+			OpExpr	   *op = lfirst_node(OpExpr, lc);
+
+			operators = lappend_oid(operators, op->opno);
+			collations = lappend_oid(collations, op->inputcollid);
+			outerkeys = lappend(outerkeys, copyObject(linitial(op->args)));
+			innerkeys = lappend(innerkeys, copyObject(lsecond(op->args)));
+		}
+		tlist = list_concat(copyObject(plan->targetlist), copyObject(child->targetlist));
+		foreach(lc, tlist)
+			lfirst_node(TargetEntry, lc)->resno = ++column;
+		hash = make_hash(child, innerkeys, InvalidOid, InvalidAttrNumber, false);
+		copy_plan_costsize(&hash->plan, child);
+		join = make_hashjoin(tlist, NIL, NIL, clauses, operators, collations,
+							 outerkeys, plan, (Plan *) hash, JOIN_INNER, NULL, false);
+		join->diamond_member = true;
+		join->diamond_head_rows = floatVal(list_nth(path->head_rows, index));
+		init_dummy_sjinfo(&sjinfo, pull_varnos(root, (Node *) plan->targetlist),
+						  pull_varnos(root, (Node *) child->targetlist));
+		join->join.plan.plan_rows = clamp_row_est(plan->plan_rows * child->plan_rows *
+												  clauselist_selectivity(root, list_nth(path->clauses, i), 0, JOIN_INNER, &sjinfo));
+		join->join.plan.plan_width = plan->plan_width + child->plan_width;
+		join->join.plan.total_cost = plan->total_cost + child->total_cost;
+		plan = (Plan *) join;
+	}
+	return plan;
+}
+
+/* A complete alternative plus its independently retained, serial native plan. */
+static Plan *
+create_diamond_join_plan(PlannerInfo *root, DiamondPath *path)
+{
+	DiamondJoin *join = makeNode(DiamondJoin);
+	Plan	   *canonical;
+	Result	   *projection;
+
+	outerPlan(join) = create_plan_recurse(root, path->fallback, CP_EXACT_TLIST);
+	canonical = diamond_canonical_plan(root, path, llast_int(path->order));
+	projection = make_gating_result(build_path_tlist(root, &path->path), NULL, canonical);
+	copy_generic_path_info(&projection->plan, &path->path);
+	innerPlan(join) = (Plan *) projection;
+	join->plan.targetlist = build_path_tlist(root, &path->path);
+	join->memory_estimate = path->memory_estimate;
+	copy_generic_path_info(&join->plan, &path->path);
+	return (Plan *) join;
+}
+
+/* Planner-local description of a factorized head and its expansion schedule. */
+typedef struct DiamondPlanParts
+{
+	Plan	   *head;
+	List	   *steps;			/* Lookup plans in preorder of relation
+								 * expansion */
+} DiamondPlanParts;
+
+/* Build an identity projection, optionally appended after existing columns. */
+static List *
+diamond_head_tlist(List *prefix, List *source, Index varno)
+{
+	List	   *result = copyObject(prefix);
+	ListCell   *lc;
+	int			column = list_length(prefix);
+
+	foreach(lc, source)
+	{
+		TargetEntry *tle = lfirst_node(TargetEntry, lc);
+		TargetEntry *copy = copyObject(tle);
+
+		copy->expr = (Expr *) makeVarFromTargetEntry(varno, tle);
+		copy->resno = ++column;
+		result = lappend(result, copy);
+	}
+	return result;
+}
+
+/*
+ * GYO guarantees every Lookup key is available in its expanded parent/child
+ * heads. Assert that invariant after native setrefs, before dropping deferred
+ * columns from physical hash inputs. No expression is silently reinterpreted.
+ */
+static bool
+diamond_check_head_key(Node *node, void *context)
+{
+	int		   *columns = context;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		int			maxcols = var->varno == OUTER_VAR ? columns[0] : columns[1];
+
+		if ((var->varno != OUTER_VAR && var->varno != INNER_VAR) ||
+			var->varattno <= 0 || var->varattno > maxcols)
+			elog(ERROR, "Diamond Lookup key depends on a deferred relation");
+		return false;
+	}
+	return expression_tree_walker(node, diamond_check_head_key, context);
+}
+
+/*
+ * Diamond-PG: factorize a reference-fixed canonical tree bottom-up. Build
+ * children expose only their heads and typed immutable descriptors. Expansion
+ * preorder exposes a child's head before its own nested relations, matching
+ * the canonical concatenated column order. This handles chains and branches,
+ * not just independent star lookups over one root head.
+ */
+static DiamondPlanParts
+diamond_factorize(PlannerInfo *root, Plan *plan)
+{
+	DiamondPlanParts result;
+	DiamondPlanParts left;
+	DiamondPlanParts right;
+	HashJoin   *join;
+	Hash	   *hash;
+	Lookup	   *lookup;
+	int			columns[2];
+
+	check_stack_depth();
+	if (IsA(plan, SeqScan))
+	{
+		result.head = plan;
+		result.steps = NIL;
+		return result;
+	}
+	join = castNode(HashJoin, plan);
+	Assert(join->diamond_member);
+	hash = castNode(Hash, innerPlan(join));
+	left = diamond_factorize(root, outerPlan(join));
+	right = diamond_factorize(root, outerPlan(hash));
+	columns[0] = list_length(left.head->targetlist);
+	columns[1] = list_length(right.head->targetlist);
+	diamond_check_head_key((Node *) join->hashclauses, columns);
+	lookup = makeNode(Lookup);
+	lookup->hashjoin = *join;
+	NodeSetTag(lookup, T_Lookup);
+	lookup->hashjoin.join.plan.plan_node_id = ++root->glob->lastPlanNodeId;
+	lookup->hashjoin.join.plan.targetlist = diamond_head_tlist(NIL,
+															   left.head->targetlist, OUTER_VAR);
+	/* Hash builds size the completed filtered head, not the unfiltered base. */
+	lookup->hashjoin.join.plan.plan_rows = clamp_row_est(join->diamond_head_rows);
+	lookup->hashjoin.join.plan.plan_width = left.head->plan_width;
+	lookup->hashjoin.join.plan.parallel_safe = false;
+	outerPlan(lookup) = left.head;
+	outerPlan(hash) = right.head;
+	hash->plan.targetlist = diamond_head_tlist(NIL, right.head->targetlist, OUTER_VAR);
+	hash->plan.plan_rows = right.head->plan_rows;
+	hash->plan.plan_width = right.head->plan_width;
+	result.head = (Plan *) lookup;
+	result.steps = list_concat(left.steps, list_make1(lookup));
+	result.steps = list_concat(result.steps, right.steps);
+	return result;
+}
+
+/* Fuse the final ordinary projection into the fully expanded top Expand. */
+static Node *
+diamond_final_projection(Node *node, void *context)
+{
+	if (node == NULL)
+		return NULL;
+	if (IsA(node, Var) && ((Var *) node)->varno == OUTER_VAR)
+	{
+		TargetEntry *tle = get_tle_by_resno(context, ((Var *) node)->varattno);
+
+		if (!tle)
+			elog(ERROR, "missing expanded Diamond projection column");
+		return (Node *) copyObject(tle->expr);
+	}
+	return expression_tree_mutator(node, diamond_final_projection, context);
+}
+
+/* Called after both branches have normal native references and unique IDs. */
+Plan *
+create_diamond_plan_references(PlannerInfo *root, Plan *plan)
+{
+	Result	   *projection = castNode(Result, innerPlan(plan));
+	Plan	   *canonical = outerPlan(projection);
+	DiamondPlanParts parts = diamond_factorize(root, canonical);
+	Plan	   *head = parts.head;
+	ListCell   *lc;
+
+	foreach(lc, parts.steps)
+	{
+		Lookup	   *owner = lfirst_node(Lookup, lc);
+		Expand	   *expand = makeNode(Expand);
+
+		expand->join.plan = *canonical;
+		NodeSetTag(expand, T_Expand);
+		expand->join.jointype = JOIN_INNER;
+		expand->join.plan.plan_node_id = ++root->glob->lastPlanNodeId;
+		expand->join.plan.targetlist = diamond_head_tlist(
+														  diamond_head_tlist(NIL, head->targetlist, OUTER_VAR),
+														  innerPlan(owner)->targetlist, INNER_VAR);
+		expand->join.plan.qual = NIL;
+		expand->join.plan.parallel_safe = false;
+		outerPlan(expand) = head;
+		innerPlan(expand) = NULL;
+		expand->lookup_plan_id = owner->hashjoin.join.plan.plan_node_id;
+		expand->final = !lnext(parts.steps, lc);
+		head = (Plan *) expand;
+	}
+	Assert(list_length(head->targetlist) == list_length(canonical->targetlist));
+	/* Both branches still return exactly the wrapper's requested target. */
+	head->targetlist = (List *) diamond_final_projection(
+														 (Node *) projection->plan.targetlist, head->targetlist);
+	head->plan_rows = projection->plan.plan_rows;
+	head->plan_width = projection->plan.plan_width;
+	innerPlan(plan) = head;
+	return plan;
+}
+
+/*
  * Diamond-PG: locate a deferred owner through typed head producers only.
  * Expand's INNER_VAR deparsing uses that Lookup's actual Hash input, not a
  * duplicated Plan subtree or a runtime pointer stored in the plan.
@@ -4389,13 +4641,22 @@ create_nestloop_plan(PlannerInfo *root,
 Lookup *
 find_diamond_lookup_plan(Plan *head, int plan_node_id)
 {
-	while (head && (IsA(head, Lookup) || IsA(head, Expand)))
+	Lookup	   *found;
+
+	check_stack_depth();
+	if (head == NULL)
+		return NULL;
+	if (IsA(head, Lookup))
 	{
-		if (IsA(head, Lookup) && head->plan_node_id == plan_node_id)
+		if (head->plan_node_id == plan_node_id)
 			return (Lookup *) head;
-		head = outerPlan(head);
+		found = find_diamond_lookup_plan(innerPlan(head), plan_node_id);
+		if (found)
+			return found;
 	}
-	return NULL;
+	else if (!IsA(head, Expand) && !IsA(head, Hash))
+		return NULL;
+	return find_diamond_lookup_plan(outerPlan(head), plan_node_id);
 }
 
 /* Follow fixed slot Vars back to a real column, rejecting computed keys. */
@@ -7434,6 +7695,7 @@ is_projection_capable_path(Path *path)
 	/* Most plan types can project, so just list the ones that can't */
 	switch (path->pathtype)
 	{
+		case T_DiamondJoin:
 		case T_Hash:
 		case T_Material:
 		case T_Memoize:
@@ -7484,6 +7746,7 @@ is_projection_capable_plan(Plan *plan)
 	/* Most plan types can project, so just list the ones that can't */
 	switch (nodeTag(plan))
 	{
+		case T_DiamondJoin:
 		case T_Hash:
 		case T_Material:
 		case T_Memoize:

@@ -6,6 +6,7 @@
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "access/htup_details.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "executor/nodeHash.h"
@@ -13,8 +14,19 @@
 #include "executor/nodeLookupExpand.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
+#include "utils/hsearch.h"
 
 bool		diamond_independent_lookup_expand = false;
+bool		diamond_acyclic = false;
+
+/* A single origin lets fallback distinguish our guard from arbitrary SQL errors. */
+void
+ExecDiamondResourceError(const char *message)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_DIAMOND_RESOURCE), errmsg_internal("%s", message)));
+	pg_unreachable();
+}
 
 /*
  * Diamond-PG: only the two typed producers carry private sidecars.  Ordinary
@@ -34,7 +46,8 @@ deferred_matches(PlanState *state)
 static void
 check_match(DiamondDeferredMatch *match)
 {
-	if (match->generation != match->owner->generation)
+	if (match->generation != (match->retained ?
+							  match->owner->storage_generation : match->owner->generation))
 		elog(ERROR, "expired Diamond Lookup match");
 }
 
@@ -63,6 +76,130 @@ copy_matches(List *matches, LookupState *exclude)
 		result = lappend(result, copy);
 	}
 	return result;
+}
+
+/*
+ * Diamond-PG: the native Hash tuple remains unchanged.  This private address
+ * index attaches immutable nested payloads without putting pointers in SQL
+ * Datums, MinimalTuples or spill files.  Entries and copied probes belong to
+ * the enclosing hash batch; their referenced child tables are pinned first.
+ */
+typedef struct DiamondBuildEntry
+{
+	HashJoinTuple tuple;		/* dynahash key */
+	List	   *matches;
+} DiamondBuildEntry;
+
+/*
+ * Pin every owner that can contribute a deferred head, before the first pull.
+ * A pinned Lookup checks the actual batch count after building, before output.
+ * Its table then cannot change batch while this build consumes later heads.
+ */
+static void
+pin_build_owners(PlanState *input)
+{
+	while (input && (IsA(input, LookupState) || IsA(input, ExpandState)))
+	{
+		if (IsA(input, LookupState))
+			((LookupState *) input)->retain_for_build = true;
+		input = outerPlanState(input);
+	}
+}
+
+/* Initialize retained storage only for a genuinely deferred Hash input. */
+void
+ExecDiamondHashBuildStart(HashState *state)
+{
+	PlanState  *input = outerPlanState(state);
+	HashJoinTable table = state->hashtable;
+	HASHCTL		ctl;
+
+	if (!IsA(input, LookupState) &&
+		!(IsA(input, ExpandState) && !((Expand *) input->plan)->final))
+		return;
+	if (!state->diamond_build_allowed)
+		elog(ERROR, "unexpanded Diamond build reached a native join");
+	if (table->nbatch != 1 || table->parallel_state != NULL)
+		ExecDiamondResourceError("retained Diamond build cannot cross hash batches");
+	pin_build_owners(input);
+	/* Native skew buckets exist only for multi-batch tables, rejected above. */
+	Assert(!table->skewEnabled);
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(HashJoinTuple);
+	ctl.entrysize = sizeof(DiamondBuildEntry);
+	ctl.hcxt = table->batchCxt;
+	table->diamond_matches = hash_create("Diamond retained build", 128, &ctl,
+										 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+/*
+ * Retain one build head and its bounded first-match descriptors, not all
+ * matching pairs.  Probe copies survive the producer's next-head reset;
+ * storage generations still detect rescan/end before borrowed table access.
+ * Actual allocation is checked, including dynahash and probe-copy overhead.
+ * On exhaustion we fail before producing any result, never spill pointers or
+ * restart a partially emitted query.  Native tables retain ordinary batching.
+ */
+void
+ExecDiamondHashBuildStore(HashState *state, HashJoinTuple tuple)
+{
+	HashJoinTable table = state->hashtable;
+	DiamondBuildEntry *entry;
+	MemoryContext oldcontext;
+	ListCell   *lc;
+
+	Assert(tuple != NULL && table->nbatch == 1);
+	oldcontext = MemoryContextSwitchTo(table->batchCxt);
+	entry = hash_search(table->diamond_matches, &tuple, HASH_ENTER, NULL);
+	entry->matches = NIL;
+	foreach(lc, deferred_matches(outerPlanState(state)))
+	{
+		DiamondDeferredMatch *match = lfirst(lc);
+		DiamondDeferredMatch *copy;
+
+		check_match(match);
+		Assert(match->owner->retain_for_build);
+		copy = palloc_object(DiamondDeferredMatch);
+		*copy = *match;
+		copy->probe_copy = match->retained ?
+			heap_copy_minimal_tuple(match->probe_copy, 0) :
+			ExecCopySlotMinimalTuple(match->first.probe);
+		copy->first.probe = NULL;
+		copy->retained = true;
+		copy->generation = match->owner->storage_generation;
+		entry->matches = lappend(entry->matches, copy);
+	}
+	ExecDiamondHashBuildCheck(table);
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/* Recheck after allocations, including the native end-of-build bucket resize. */
+void
+ExecDiamondHashBuildCheck(HashJoinTable table)
+{
+	size_t		allocated;
+
+	if (table->diamond_matches == NULL)
+		return;
+	allocated = MemoryContextMemAllocated(table->batchCxt, true);
+	table->spacePeak = Max(table->spacePeak, allocated);
+	if (allocated > table->spaceAllowed)
+		ExecDiamondResourceError("retained Diamond build exceeds hash memory limit");
+}
+
+/* Resolve one table tuple's typed nested payload, after owner validation. */
+static List *
+build_matches(DiamondHashMatch *cursor)
+{
+	DiamondBuildEntry *entry;
+
+	if (cursor->table->diamond_matches == NULL)
+		return NIL;
+	entry = hash_search(cursor->table->diamond_matches, &cursor->current,
+						HASH_FIND, NULL);
+	if (!entry)
+		elog(ERROR, "missing retained Diamond build payload");
+	return entry->matches;
 }
 
 /*
@@ -108,6 +245,8 @@ ExecLookup(PlanState *pstate)
 	match->owner = state;
 	match->generation = state->generation;
 	match->first = *hashjoin->hj_DiamondMatch;
+	match->probe_copy = NULL;
+	match->retained = false;
 	state->deferred = lappend(state->deferred, match);
 	MemoryContextSwitchTo(oldcontext);
 	return head;
@@ -124,6 +263,7 @@ ExecInitLookup(Lookup *node, EState *estate, int eflags)
 	if (estate->es_plannedstmt->parallelModeNeeded || IsParallelWorker())
 		elog(ERROR, "Diamond Lookup cannot execute in a parallel query");
 	ExecInitHashJoinState(&node->hashjoin, estate, eflags, &state->hashjoin);
+	((HashState *) innerPlanState(state))->diamond_build_allowed = true;
 	state->hashjoin.js.ps.ExecProcNode = ExecLookup;
 	state->hashjoin.hj_DiamondMatch = palloc0_object(DiamondHashMatch);
 	state->head_context = AllocSetContextCreate(estate->es_query_cxt,
@@ -142,6 +282,7 @@ ExecInitLookup(Lookup *node, EState *estate, int eflags)
 void
 ExecEndLookup(LookupState *state)
 {
+	state->storage_generation++;
 	reset_lookup_head(state);
 	ExecEndHashJoin(&state->hashjoin);
 	MemoryContextDelete(state->head_context);
@@ -151,6 +292,7 @@ ExecEndLookup(LookupState *state)
 void
 ExecReScanLookup(LookupState *state)
 {
+	state->storage_generation++;
 	reset_lookup_head(state);
 	ExecReScanHashJoin(&state->hashjoin);
 }
@@ -169,6 +311,7 @@ reset_expand_head(ExpandState *state)
 	memset(state->cursor, 0, sizeof(DiamondHashMatch));
 	ExecClearTuple(state->ps.ps_ResultTupleSlot);
 	ExecClearTuple(state->match_slot);
+	ExecClearTuple(state->retained_probe_slot);
 	MemoryContextReset(state->head_context);
 }
 
@@ -211,6 +354,13 @@ ExecExpand(PlanState *pstate)
 					check_match(match);
 					*state->cursor = match->first;
 					state->owner_generation = match->generation;
+					state->retained_match = match->retained;
+					if (match->retained)
+					{
+						ExecStoreMinimalTuple(match->probe_copy,
+											  state->retained_probe_slot, false);
+						state->cursor->probe = state->retained_probe_slot;
+					}
 					found = true;
 					break;
 				}
@@ -220,13 +370,12 @@ ExecExpand(PlanState *pstate)
 			oldcontext = MemoryContextSwitchTo(state->head_context);
 			state->deferred = copy_matches(matches, state->owner);
 			MemoryContextSwitchTo(oldcontext);
-			if (plan->final && state->deferred != NIL)
-				elog(ERROR, "unexpanded Diamond matches reached a SQL tuple boundary");
 			state->have_head = true;
 		}
 
 		/* Check the query-owned generation before touching the table/probe. */
-		if (state->owner_generation != state->owner->generation)
+		if (state->owner_generation != (state->retained_match ?
+										state->owner->storage_generation : state->owner->generation))
 			elog(ERROR, "expired Diamond Lookup match");
 		if (!ExecHashExpand(state->cursor, state->owner->hashjoin.hashclauses,
 							state->match_slot,
@@ -245,9 +394,48 @@ ExecExpand(PlanState *pstate)
 		if (plan->join.inner_unique)
 			state->have_head = false;
 		if (ExecQual(pstate->qual, econtext))
+		{
+			MemoryContext oldcontext;
+
+			/* Each selected build tuple may introduce different nested heads. */
+			if (state->cursor->table->diamond_matches)
+			{
+				MemoryContextReset(state->head_context);
+				oldcontext = MemoryContextSwitchTo(state->head_context);
+				state->deferred = copy_matches(
+											   deferred_matches(outerPlanState(state)), state->owner);
+				state->deferred = list_concat(state->deferred,
+											  copy_matches(build_matches(state->cursor), NULL));
+				MemoryContextSwitchTo(oldcontext);
+			}
+			if (plan->final && state->deferred != NIL)
+				elog(ERROR, "unexpanded Diamond matches reached a SQL tuple boundary");
 			return ExecProject(pstate->ps_ProjInfo);
+		}
 		InstrCountFiltered2(state, 1);
 	}
+}
+
+/* Find a query-owned Lookup in the typed physical tree, including build arms. */
+static LookupState *
+find_lookup_state(PlanState *input, int id)
+{
+	LookupState *found;
+
+	check_stack_depth();
+	if (input == NULL)
+		return NULL;
+	if (IsA(input, LookupState))
+	{
+		if (input->plan->plan_node_id == id)
+			return (LookupState *) input;
+		found = find_lookup_state(innerPlanState(input), id);
+		if (found)
+			return found;
+	}
+	else if (!IsA(input, ExpandState) && !IsA(input, HashState))
+		return NULL;
+	return find_lookup_state(outerPlanState(input), id);
 }
 
 /*
@@ -267,18 +455,13 @@ ExecInitExpand(Expand *node, EState *estate, int eflags)
 	state->ps.ExecProcNode = ExecExpand;
 	ExecAssignExprContext(estate, &state->ps);
 	outerPlanState(state) = ExecInitNode(outerPlan(node), estate, eflags);
-	for (owner = outerPlanState(state); owner; owner = outerPlanState(owner))
-	{
-		if (IsA(owner, LookupState) &&
-			owner->plan->plan_node_id == node->lookup_plan_id)
-			break;
-		if (!IsA(owner, LookupState) && !IsA(owner, ExpandState))
-			elog(ERROR, "invalid Diamond head producer");
-	}
+	owner = (PlanState *) find_lookup_state(outerPlanState(state), node->lookup_plan_id);
 	if (!owner)
 		elog(ERROR, "missing Diamond Lookup owner");
 	state->owner = (LookupState *) owner;
 	state->cursor = palloc0_object(DiamondHashMatch);
+	state->retained_probe_slot = ExecInitExtraTupleSlot(estate,
+														ExecGetResultType(outerPlanState(state->owner)), &TTSOpsMinimalTuple);
 	state->head_context = AllocSetContextCreate(estate->es_query_cxt,
 												"Diamond Expand head",
 												ALLOCSET_DEFAULT_SIZES);
@@ -312,4 +495,88 @@ ExecReScanExpand(ExpandState *state)
 	reset_expand_head(state);
 	if (outerPlanState(state)->chgParam == NULL)
 		ExecReScan(outerPlanState(state));
+}
+
+/*
+ * Diamond-PG: immutable scans and parameter-free join inputs permit a native
+ * retry if actual retained storage does not fit.  Preparation pulls exactly
+ * one complete result before exposing anything. All contributing hash builds
+ * finish before that result; no retained table may repartition afterwards.
+ * Catch only our resource signal, never cancellation, OOM or SQL errors.
+ */
+static TupleTableSlot *
+ExecDiamondJoin(PlanState *pstate)
+{
+	DiamondJoinState *state = castNode(DiamondJoinState, pstate);
+	TupleTableSlot *result = NULL;
+	MemoryContext oldcontext = CurrentMemoryContext;
+
+	if (state->prepared)
+		return ExecProcNode(state->fallback ? outerPlanState(state) : innerPlanState(state));
+	PG_TRY();
+	{
+		result = ExecProcNode(innerPlanState(state));
+	}
+	PG_CATCH();
+	{
+		ErrorData  *error;
+
+		MemoryContextSwitchTo(oldcontext);
+		error = CopyErrorData();
+		if (error->sqlerrcode != ERRCODE_DIAMOND_RESOURCE ||
+			!error->funcname || strcmp(error->funcname, "ExecDiamondResourceError") != 0)
+			PG_RE_THROW();
+		FreeErrorData(error);
+		FlushErrorState();
+		/* Release every failed private table before running the native plan. */
+		ExecEndNode(innerPlanState(state));
+		innerPlanState(state) = NULL;
+		state->fallback = true;
+	}
+	PG_END_TRY();
+	state->prepared = true;
+	if (state->fallback)
+		result = ExecProcNode(outerPlanState(state));
+	return result;
+}
+
+/* Both initialized branches have identical target descriptors and parameters. */
+DiamondJoinState *
+ExecInitDiamondJoin(DiamondJoin *node, EState *estate, int eflags)
+{
+	DiamondJoinState *state = makeNode(DiamondJoinState);
+
+	state->ps.plan = (Plan *) node;
+	state->ps.state = estate;
+	state->ps.ExecProcNode = ExecDiamondJoin;
+	outerPlanState(state) = ExecInitNode(outerPlan(node), estate, eflags);
+	innerPlanState(state) = ExecInitNode(innerPlan(node), estate, eflags);
+	ExecInitResultTupleSlotTL(&state->ps, &TTSOpsVirtual);
+	return state;
+}
+
+/* An error before the first result may already have ended the optimized arm. */
+void
+ExecEndDiamondJoin(DiamondJoinState *state)
+{
+	ExecEndNode(outerPlanState(state));
+	ExecEndNode(innerPlanState(state));
+}
+
+/* Reprepare per rescan, rebuilding a previously rejected optimized arm. */
+void
+ExecReScanDiamondJoin(DiamondJoinState *state)
+{
+	state->prepared = false;
+	state->fallback = false;
+	if (!outerPlanState(state)->chgParam)
+		ExecReScan(outerPlanState(state));
+	if (innerPlanState(state))
+	{
+		if (!innerPlanState(state)->chgParam)
+			ExecReScan(innerPlanState(state));
+	}
+	else
+		innerPlanState(state) = ExecInitNode(innerPlan(state->ps.plan),
+											 state->ps.state, 0);
 }
