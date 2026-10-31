@@ -1,5 +1,20 @@
 # Diamond-PG changelog
 
+## 2026-10-31 - Independent native inputs and serial fallback
+
+Removed the already-pruned pure HashPath/SeqScan-survivor prerequisite.
+Construct a legal serial scan path independently; consider audited ordinary
+unparameterized heap/index/index-only/bitmap inputs. Build a separate normal
+serial hash fallback from the legal EC shape, retaining immutable scan/target/
+snapshot semantics and actual pre-output resource guards. Native indexed and
+parallel competitors remain available; no cost constants were lowered.
+
+Assertion build, focused1/1 (17.133s) and full core240/240 pass. New selected
+scan-kind, differential bag, copied/rewound indexed resource fallback oracles
+are true; expected changes reviewed. This is the first bounded correction,
+not full paperSection4 integration or a new performance claim. The required
+comparable-state/boundary/earlyExpand search and reevaluation remain active.
+
 ## 2026-10-31 - Preserve reviewed per-query benchmark evidence
 
 Checkpoint441f907cf6 contains the tested bounded source/diagnosis. Added one

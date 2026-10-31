@@ -4393,7 +4393,7 @@ create_nestloop_plan(PlannerInfo *root,
  * happens at the ordinary fully expanded Result boundary above the tree.
  */
 static Plan *
-diamond_canonical_plan(PlannerInfo *root, DiamondPath *path, int index)
+diamond_canonical_plan(PlannerInfo *root, DiamondPath *path, int index, bool deferred)
 {
 	Plan	   *plan = create_plan_recurse(root,
 										   list_nth(path->base_paths, index), CP_EXACT_TLIST);
@@ -4419,7 +4419,7 @@ diamond_canonical_plan(PlannerInfo *root, DiamondPath *path, int index)
 		i = lfirst_int(ear);
 		if (list_nth_int(path->parents, i) != index)
 			continue;
-		child = diamond_canonical_plan(root, path, i);
+		child = diamond_canonical_plan(root, path, i, deferred);
 		clauses = extract_actual_clauses(list_nth(path->clauses, i), false);
 		foreach(lc, clauses)
 		{
@@ -4437,7 +4437,7 @@ diamond_canonical_plan(PlannerInfo *root, DiamondPath *path, int index)
 		copy_plan_costsize(&hash->plan, child);
 		join = make_hashjoin(tlist, NIL, NIL, clauses, operators, collations,
 							 outerkeys, plan, (Plan *) hash, JOIN_INNER, NULL, false);
-		join->diamond_member = true;
+		join->diamond_member = deferred;
 		join->diamond_head_rows = floatVal(list_nth(path->head_rows, index));
 		init_dummy_sjinfo(&sjinfo, pull_varnos(root, (Node *) plan->targetlist),
 						  pull_varnos(root, (Node *) child->targetlist));
@@ -4458,8 +4458,18 @@ create_diamond_join_plan(PlannerInfo *root, DiamondPath *path)
 	Plan	   *canonical;
 	Result	   *projection;
 
-	outerPlan(join) = create_plan_recurse(root, path->fallback, CP_EXACT_TLIST);
-	canonical = diamond_canonical_plan(root, path, llast_int(path->order));
+	/*
+	 * Diamond-PG: this independently built ordinary serial tree has no
+	 * deferred payloads and may use native batching. It remains available
+	 * even when normal native path pruning removed the same hash shape. Both
+	 * arms retain exactly the same immutable scans, snapshot and target; the
+	 * fallback is never pulled before a resident-arm resource rejection.
+	 */
+	canonical = diamond_canonical_plan(root, path, llast_int(path->order), false);
+	projection = make_gating_result(build_path_tlist(root, &path->path), NULL, canonical);
+	copy_plan_costsize(&projection->plan, canonical);
+	outerPlan(join) = (Plan *) projection;
+	canonical = diamond_canonical_plan(root, path, llast_int(path->order), true);
 	projection = make_gating_result(build_path_tlist(root, &path->path), NULL, canonical);
 	copy_generic_path_info(&projection->plan, &path->path);
 	innerPlan(join) = (Plan *) projection;
@@ -4541,7 +4551,8 @@ diamond_factorize(PlannerInfo *root, Plan *plan)
 	int			columns[2];
 
 	check_stack_depth();
-	if (IsA(plan, SeqScan))
+	if (IsA(plan, SeqScan) || IsA(plan, IndexScan) ||
+		IsA(plan, IndexOnlyScan) || IsA(plan, BitmapHeapScan))
 	{
 		result.head = plan;
 		result.steps = NIL;

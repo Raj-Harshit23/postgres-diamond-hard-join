@@ -3949,30 +3949,6 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
  * original states of those data structures.  See geqo_eval() for an example.
  */
 /*
- * Diamond-PG: keep a serial native fallback whose child contracts are known.
- * Native indexed, merge and parallel alternatives still compete normally;
- * this prototype adds an alternative only when a serial heap/hash skeleton
- * remains available. Parameterized and arbitrary executor boundaries stay native.
- */
-static bool
-diamond_native_tree(Path *path)
-{
-	if (path->param_info || path->parallel_aware)
-		return false;
-	if (IsA(path, Path) && path->pathtype == T_SeqScan)
-		return true;
-	if (IsA(path, HashPath))
-	{
-		HashPath   *hash = (HashPath *) path;
-
-		return hash->jpath.jointype == JOIN_INNER &&
-			diamond_native_tree(hash->jpath.outerjoinpath) &&
-			diamond_native_tree(hash->jpath.innerjoinpath);
-	}
-	return false;
-}
-
-/*
  * Diamond-PG: build relation hyperedges from PostgreSQL EquivalenceClasses,
  * not textual equality edges. GYO removes an ear when all attributes shared
  * with the remaining relations occur in one parent. Equalities such as
@@ -3995,9 +3971,7 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 	EquivalenceClass **classes;
 	DiamondPath *diamond;
 	DiamondPath *template;
-	HashPath   *native;
 	int			preferred_root;
-	Path	   *fallback = NULL;
 	ListCell   *lc;
 	int			i;
 	int			e;
@@ -4010,16 +3984,14 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 		root->parse->hasTargetSRFs || root->parse->rowMarks ||
 		root->join_info_list || root->placeholder_list || root->hasLateralRTEs)
 		return;
-	foreach(lc, joinrel->pathlist)
-	{
-		Path	   *path = lfirst(lc);
 
-		if (diamond_native_tree(path) &&
-			(!fallback || path->total_cost < fallback->total_cost))
-			fallback = path;
-	}
-	if (!fallback)
-		return;
+	/*
+	 * Diamond-PG: normal path pruning must not decide whether this distinct
+	 * execution strategy exists. Its resident arm and ordinary serial hash
+	 * fallback are constructed independently from the same legal EC tree.
+	 * Indexed/parallel/native join alternatives remain in the normal memo.
+	 */
+
 	rels = palloc_array(RelOptInfo *, n);
 	attrs = palloc0_array(Bitmapset *, n);
 	members = palloc0_array(Var **, nec);
@@ -4029,11 +4001,12 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 	diamond->path.parent = joinrel;
 	diamond->path.pathtarget = joinrel->reltarget;
 	diamond->path.rows = joinrel->rows;
-	diamond->path.disabled_nodes = fallback->disabled_nodes;
+	diamond->path.disabled_nodes = enable_hashjoin ? 0 : n - 1;
 	for (i = 0; i < n; i++)
 	{
 		RangeTblEntry *rte;
-		Path	   *scan = NULL;
+		Path	   *scan;
+
 		ListCell   *cell;
 
 		rti = bms_next_member(joinrel->relids, rti);
@@ -4054,16 +4027,23 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 			if (!IsA(var, Var) || var->varno != rti || var->varattno <= 0)
 				return;
 		}
+		/* A valid serial heap alternative may already have been pruned. */
+		scan = create_seqscan_path(root, rels[i], NULL, 0);
 		foreach(cell, rels[i]->pathlist)
 		{
 			Path	   *path = lfirst(cell);
 
-			if (path->pathtype == T_SeqScan && !path->param_info &&
-				!path->parallel_aware && (!scan || path->total_cost < scan->total_cost))
+			/*
+			 * These native scans expose ordinary tuples. No parameterized
+			 * index probe or parallel state can enter a deferred build.
+			 */
+			if ((path->pathtype == T_SeqScan || path->pathtype == T_IndexScan ||
+				 path->pathtype == T_IndexOnlyScan || path->pathtype == T_BitmapHeapScan) &&
+				!path->param_info && !path->parallel_aware && path->parallel_workers == 0 &&
+				compare_path_costs(path, scan, TOTAL_COST) < 0)
 				scan = path;
 		}
-		if (!scan)
-			return;
+		diamond->path.disabled_nodes += scan->disabled_nodes;
 		diamond->base_paths = lappend(diamond->base_paths, scan);
 		diamond->parents = lappend_int(diamond->parents, -1);
 		diamond->clauses = lappend(diamond->clauses, NIL);
@@ -4103,10 +4083,6 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 		e++;
 	}
 	template = diamond;
-	/* Preserve the native top before any add_path call can prune it. */
-	native = palloc_object(HashPath);
-	memcpy(native, fallback, sizeof(HashPath));
-	fallback = (Path *) native;
 	for (preferred_root = 0; preferred_root < n; preferred_root++)
 	{
 		diamond = makeNode(DiamondPath);
@@ -4186,9 +4162,8 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 		diamond->order = lappend_int(diamond->order, bms_singleton_member(active));
 		if (!cost_diamond_path(root, diamond))
 			continue;
-		elog(DEBUG1, "Diamond acyclic cost %.2f versus native hash cost %.2f",
-			 diamond->path.total_cost, fallback->total_cost);
-		diamond->fallback = fallback;
+		elog(DEBUG1, "Diamond acyclic cost %.2f versus native cost %.2f",
+			 diamond->path.total_cost, joinrel->cheapest_total_path->total_cost);
 		add_path(joinrel, (Path *) diamond);
 	}
 	set_cheapest(joinrel);

@@ -10,19 +10,37 @@ The user authorized Phase 3 completion, Phase 4, Phase 5 and relevant Phase 8,
 superseding the old Phase 3-only instruction. One platform-delegated worker is
 authorized and owns editing; do not start any duplicate coding attempt.
 
-## Active next milestone and authorized checkpoint
+## Active correction: first independent-input/fallback increment
 
-The user now requests proper paper Section4 optimizer integration, explicitly
-excluding GEQO, and authorizes commits/pushes under the identity above. No
-integration-correction source edits have begun. Bounded source/diagnosis checkpoint441f907cf6 is committed with verified
-user authorship. Versioned per-query results follow in a second coherent
-checkpoint; normal remote push verification remains pending. Then design comparable
-expanded/deferred memo states, boundary/early Expand scheduling, independently
-constructed legal scans and a safe serial native fallback that does not depend
-on already-pruned heap/hash survivors. Retain all existing semantic/ownership
-restrictions until individually proved safe; parallel native paths compete
-outside the private wrapper. This checkpoint is not the full Section4 optimizer.
-Do not stop the correction task merely because a checkpoint is published.
+Published checkpoints are441f907cf6 (tested bounded source/diagnosis) and
+76a429556e (versioned per-query results). Remote diamond-pg-cloud SHA was
+verified76a429556e4ba9f546cdf2b89da538c7c35891be; both commits have author AND
+committer harshit <harshitraj969@gmail.com>. Original diamond-pg unchanged.
+
+The user requests proper paper Section4 integration, explicitly excluding GEQO,
+and unattended continuation through implementation/tests/optimized evaluation.
+First increment now edits allpaths.c,createplan.c,nodeLookupExpand.c and
+pathnodes.h: independently construct legal serial scans and an ordinary serial
+hash fallback from the normalized EC shape; consider only audited, unparameterized
+native heap/index/index-only/bitmap inputs. Native indexed/parallel competitors
+remain external, no Gather in the private wrapper, no mutable/boundary/parallel
+guard removed and no cost constants lowered. Assertion/header-dependent build
+passed (`.work/build/sec4-step1-build.log`). Focused1/1 in17.133s and full core240/240 now pass, with seven new reviewed
+indexed/bitmap, differential and copied/rewound indexed-fallback positive
+oracles. Logs `.work/build/sec4-step1-{build,focused,core,indent}.log`.
+This coherent first correction is ready for an authorized checkpoint.
+Diagnostic server55436 runs the corrected debug input/fallback increment;
+benchmark server55434 remains the published optimized baseline. No current
+benchmark coverage/performance change is claimed. This is NOT completion
+of paper Section4; no correction checkpoint may be committed until validated.
+
+Next stage: a separate minimized expanded-set/Lookup-tree memo; compute native
+EC predicate boundaries, required and reliable early Expand alternatives on
+legal standard-search subsets. Only fully expanded comparable outputs enter
+ordinary add_path; preserve native reference fixing, Params/rescan/copy/read
+contracts. Native semijoin survival and conditional fanout must replace naive
+existence assumptions with evidence, without arbitrary tuning/forced choices.
+GEQO remains native. Parent read-only; no extra agent or approval is pending.
 
 ## Completed follow-up: zero-coverage diagnosis
 

@@ -673,6 +673,58 @@ select (select count(*) from auto_fallback)=160000 and not exists (
   union all
   (table auto_fallback except all table auto_roundtrip)
 ) as automatic_copy_rescan_native_fallback;
+-- Native path pruning may remove the pure heap/hash shape. Independent
+-- scan construction and fallback must still admit safe indexed SQL tuples.
+create function auto_scan_kind(query text, kind text)
+returns boolean language plpgsql as $$
+declare p jsonb; ok boolean;
+begin
+  execute 'explain (analyze,format json) ' || query into p;
+  with recursive nodes(n) as (
+    select p->0->'Plan'
+    union all
+    select c from nodes, lateral jsonb_array_elements(n->'Plans') c
+  )
+  select bool_or(n->>'Node Type'='Diamond Join'
+                  and n->>'Diamond Runtime Fallback'='false')
+     and bool_or(n->>'Node Type'=kind and (n->>'Actual Loops')::int>0)
+    into ok from nodes;
+  return ok;
+end;
+$$;
+create table auto_index_root as
+  select i as id,i%2 as a,i%2 as b from generate_series(1,100000) i;
+create table auto_index_leaf as
+  select i as id,i%2 as a from generate_series(1,100000) i;
+create index on auto_index_root(id);
+create index on auto_index_leaf(id);
+analyze auto_index_root,auto_index_leaf;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_index_leaf s using(a) join auto_t t using(b) where s.id<=40',2) as automatic_index_build_bag;
+select auto_scan_kind('select r.a,s.a as sa,t.b from auto_index_root r join auto_s s using(a) join auto_t t using(b) where r.id<=400','Index Scan') as automatic_index_probe;
+create table auto_index_fallback as select * from test_automatic($q$
+  select r.a,s.a as sa,t.b from auto_index_root r
+  join auto_s s using(a) join auto_t t using(b) where r.id<=400
+$q$,true) as result(a int,sa int,b int);
+set local diamond_acyclic=off;
+select (select count(*) from auto_index_fallback)=160000 and not exists (
+  (select r.a,s.a as sa,t.b from auto_index_root r join auto_s s using(a)
+   join auto_t t using(b) where r.id<=400 except all table auto_index_fallback)
+  union all
+  (table auto_index_fallback except all
+   select r.a,s.a as sa,t.b from auto_index_root r join auto_s s using(a)
+   join auto_t t using(b) where r.id<=400)
+) as automatic_index_copy_rescan_fallback;
+set local diamond_acyclic=on;
+drop index auto_index_root_id_idx;
+create index on auto_index_root(id) include(a,b);
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_index_root r join auto_s s using(a) join auto_t t using(b) where r.id<=400',2) as automatic_index_only_bag;
+select auto_scan_kind('select r.a,s.a as sa,t.b from auto_index_root r join auto_s s using(a) join auto_t t using(b) where r.id<=400','Index Only Scan') as automatic_index_only_probe;
+create table auto_bitmap_root as select (i*7919::bigint)%100003 as id,
+  i%2 as a,i%2 as b from generate_series(1,100000) i;
+create index on auto_bitmap_root(id);
+analyze auto_bitmap_root;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_bitmap_root r join auto_s s using(a) join auto_t t using(b) where r.id<=400',2) as automatic_bitmap_bag;
+select auto_scan_kind('select r.a,s.a as sa,t.b from auto_bitmap_root r join auto_s s using(a) join auto_t t using(b) where r.id<=400','Bitmap Heap Scan') as automatic_bitmap_probe;
 insert into auto_root values (null,0),(0,null);
 insert into auto_s values (null);
 insert into auto_t values (null);

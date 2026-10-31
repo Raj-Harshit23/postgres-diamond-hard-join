@@ -21,6 +21,24 @@ not zero. `counterfactual_min_cost`/`native_join_reference_cost` are diagnostic
 planner cost units with candidate admission disabled, not execution times or
 actual cost losses. Indexed/parallel native alternatives remained enabled.
 
+## First correction increment validation
+
+After removing the path-survivor prerequisite, the assertion/debug/header-
+dependent build passes. Updated focused1/1 passes in17.133s; full core240/240
+passes. Seven new reviewed oracles are true: normal-cost selected indexed
+build/probe, IndexOnlyScan probe, BitmapHeapScan probe, indexed differential
+bags and copied/rewound indexed native resource fallback. No planner method,
+index or parallel option is disabled to select these positive cases. The C
+fallback fixture changes only physical sizing after actual cost selection,
+then verifies its160,000-row native bag and rescan. Existing tests are unchanged.
+Logs: `.work/build/sec4-step1-{build,focused,core,indent}.log`; the first
+new-expectation review diff contained only87 added lines, all positive oracles.
+The standalone indexed build example is
+`.work/diagnosis/sec4-step1-index.log`. These are correctness tests, not final
+performance evaluation. Published benchmark-results.csv remains source441f907cf6;
+proper Section4 state/boundary/earlyExpand integration and optimized reevaluation
+remain active. Do not claim this first increment alone implements Section4.
+
 ## Current automatic integration validation (2026-10-31)
 
 The final current-source assertion/debug/header-dependent build completed,

@@ -11,6 +11,14 @@ GEQO. Decouple legal scan/fallback construction from pruned native survivors.
 No correction source is included in this checkpoint. User authorizes normal
 commits/pushes as harshit <harshitraj969@gmail.com>, without AI attribution.
 
+First correction increment validated: independent canonical serial fallback,
+independently constructed heap paths and audited unparameterized native indexed
+inputs replace the original path-survivor prerequisite. Assertion focused1/1
+and full core240/240 pass, including selected IndexScan/IndexOnlyScan/BitmapHeapScan
+and indexed native resource fallback. No constants lowered, no native options
+disabled. Full paperSection4 comparable-state/boundary/earlyExpand work remains
+active; the earlier benchmark table is a published baseline, not new coverage.
+
 ## Current status and boundaries
 
 | Phase | Current status | Evidence / remaining gate |

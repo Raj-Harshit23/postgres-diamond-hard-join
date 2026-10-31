@@ -58,7 +58,7 @@ check_match(DiamondDeferredMatch *match)
  * Tuples remain borrowed from validated query-owned Lookup owners.
  */
 static List *
-copy_matches(List *matches, LookupState *exclude)
+copy_matches(List *matches, LookupState * exclude)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
@@ -189,7 +189,7 @@ ExecDiamondHashBuildCheck(HashJoinTable table)
 
 /* Resolve one table tuple's typed nested payload, after owner validation. */
 static List *
-build_matches(DiamondHashMatch *cursor)
+build_matches(DiamondHashMatch * cursor)
 {
 	DiamondBuildEntry *entry;
 
@@ -208,7 +208,7 @@ build_matches(DiamondHashMatch *cursor)
  * check even after the head's tuples/list cells have been released.
  */
 static void
-reset_lookup_head(LookupState *state)
+reset_lookup_head(LookupState * state)
 {
 	state->generation++;
 	memset(state->hashjoin.hj_DiamondMatch, 0, sizeof(DiamondHashMatch));
@@ -254,7 +254,7 @@ ExecLookup(PlanState *pstate)
 
 /* Initialize a serial Lookup, sharing native hash state and its lifecycles. */
 LookupState *
-ExecInitLookup(Lookup *node, EState *estate, int eflags)
+ExecInitLookup(Lookup * node, EState *estate, int eflags)
 {
 	LookupState *state = makeNode(LookupState);
 	PlanState  *input;
@@ -270,8 +270,17 @@ ExecInitLookup(Lookup *node, EState *estate, int eflags)
 												"Diamond Lookup head",
 												ALLOCSET_DEFAULT_SIZES);
 	input = outerPlanState(state);
-	if (!IsA(input, SeqScanState) && !IsA(input, LookupState) &&
-		!IsA(input, ExpandState))
+
+	/*
+	 * Diamond-PG: unparameterized native heap/index/bitmap scans produce
+	 * fully expanded SQL tuples. Hash admission uses their native slot ops;
+	 * the owned head copy and later equality deformation remain dynamic.
+	 * Parameterized scans, joins and opaque executor boundaries are not
+	 * admitted by the planner or this physical contract.
+	 */
+	if (!IsA(input, SeqScanState) && !IsA(input, IndexScanState) &&
+		!IsA(input, IndexOnlyScanState) && !IsA(input, BitmapHeapScanState) &&
+		!IsA(input, LookupState) && !IsA(input, ExpandState))
 		elog(ERROR, "invalid Diamond Lookup head input");
 	state->has_deferred_input = IsA(input, LookupState) ||
 		(IsA(input, ExpandState) && !((Expand *) input->plan)->final);
@@ -280,7 +289,7 @@ ExecInitLookup(Lookup *node, EState *estate, int eflags)
 
 /* Invalidate borrowed references before native table/child cleanup. */
 void
-ExecEndLookup(LookupState *state)
+ExecEndLookup(LookupState * state)
 {
 	state->storage_generation++;
 	reset_lookup_head(state);
@@ -290,7 +299,7 @@ ExecEndLookup(LookupState *state)
 
 /* A parameter change may rebuild native storage; invalidate first. */
 void
-ExecReScanLookup(LookupState *state)
+ExecReScanLookup(LookupState * state)
 {
 	state->storage_generation++;
 	reset_lookup_head(state);
@@ -303,7 +312,7 @@ ExecReScanLookup(LookupState *state)
  * retains this state for a later NO SCROLL FETCH, just like native HashJoin.
  */
 static void
-reset_expand_head(ExpandState *state)
+reset_expand_head(ExpandState * state)
 {
 	state->have_head = false;
 	state->input_head = NULL;
@@ -444,7 +453,7 @@ find_lookup_state(PlanState *input, int id)
  * physical right child of Expand; OUTER_VAR remains the current input head.
  */
 ExpandState *
-ExecInitExpand(Expand *node, EState *estate, int eflags)
+ExecInitExpand(Expand * node, EState *estate, int eflags)
 {
 	ExpandState *state = makeNode(ExpandState);
 	PlanState  *owner;
@@ -481,7 +490,7 @@ ExecInitExpand(Expand *node, EState *estate, int eflags)
 
 /* Clear views before ending the child Lookup owners, then release contexts. */
 void
-ExecEndExpand(ExpandState *state)
+ExecEndExpand(ExpandState * state)
 {
 	reset_expand_head(state);
 	ExecEndNode(outerPlanState(state));
@@ -490,7 +499,7 @@ ExecEndExpand(ExpandState *state)
 
 /* Discard iteration before parameters can rebuild a child's hash table. */
 void
-ExecReScanExpand(ExpandState *state)
+ExecReScanExpand(ExpandState * state)
 {
 	reset_expand_head(state);
 	if (outerPlanState(state)->chgParam == NULL)

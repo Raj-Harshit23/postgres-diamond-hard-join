@@ -23,7 +23,8 @@ same-type equalities carry native operator/collation semantics.
 
 Only a fully expanded `DiamondPath` enters ordinary `add_path` competition.
 It contains base scan Paths, parent/ear order, clauses, filtered-head estimates,
-live-memory estimate and a preserved serial native HashPath fallback. Native
+live-memory estimate. A separate ordinary serial hash fallback is built from
+the same normalized EC tree, independently of native path pruning. Native
 indexed, merge, nested-loop and parallel alternatives remain available.
 `costsize.c:cost_diamond_path` estimates native join selectivity, first-match
 head filtering, hash build/probe, owned probe and descriptor copies,
@@ -91,6 +92,23 @@ Native startup/scanner leaks and relcache/WAL uninitialized writes remain
 unsuppressed; no invalid access was reported and no clean memory pass is claimed.
 [TESTING.md](TESTING.md) records current evidence and commands;
 [EXECPLAN.md](EXECPLAN.md) records the live restart checkpoint.
+
+## First correction: pruning-independent inputs/fallback
+
+The first follow-up increment removes the proven path-survivor dependency.
+`create_seqscan_path` supplies a legal serial heap alternative even after
+native pruning; cheaper supported unparameterized index/index-only/bitmap
+paths compete as inputs. Canonical native fallback and optimized trees have
+separate ordinary Plan states, identical immutable scans/targets/snapshot,
+and no Gather/parallel or deferred payload in the fallback. Native competitors
+remain unchanged. Runtime owns/copied-head slot deformation works with each
+explicitly admitted native scan state. New selected-input, multiset, copy/read,
+rewind and resource-fallback tests pass; focused1/1 and core240/240 pass.
+
+This remains the complete two-phase scheduler. Comparable minimized-state,
+predicate-boundary and early-Expand integration is the next required increment;
+it is not claimed complete here. Published performance/diagnosis below belongs
+to checkpoint441f907cf6 and must not be presented as corrected-source coverage.
 
 ## Observed planner-coverage limitation
 
