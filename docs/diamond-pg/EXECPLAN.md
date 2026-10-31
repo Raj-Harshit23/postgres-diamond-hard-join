@@ -14,8 +14,9 @@ authorized and owns editing; do not start any duplicate coding attempt.
 
 The user now requests proper paper Section4 optimizer integration, explicitly
 excluding GEQO, and authorizes commits/pushes under the identity above. No
-integration-correction source edits have begun. First preserve this tested
-bounded milestone/diagnosis as a coherent checkpoint; then design comparable
+integration-correction source edits have begun. Bounded source/diagnosis checkpoint441f907cf6 is committed with verified
+user authorship. Versioned per-query results follow in a second coherent
+checkpoint; normal remote push verification remains pending. Then design comparable
 expanded/deferred memo states, boundary/early Expand scheduling, independently
 constructed legal scans and a safe serial native fallback that does not depend
 on already-pruned heap/hash survivors. Retain all existing semantic/ownership

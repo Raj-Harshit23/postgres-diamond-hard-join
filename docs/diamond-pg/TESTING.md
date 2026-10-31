@@ -1,9 +1,25 @@
 # Building and testing Diamond-PG
 
-This validated bounded implementation/diagnosis is being checkpointed with
+This validated bounded implementation/diagnosis was committed as441f907cf6 with
 user-authorized normal commit/push and user authorship. Paper Section4
 correction (GEQO excluded) remains the next milestone; none of its proposed
 changes is implied by the validation results below.
+
+Versioned per-query results are
+[`benchmark-results.csv`](../../scripts/diamond-pg/benchmark-results.csv):
+all22TPC-H,113JOB and3paper scales, plus observed planner-gate diagnosis for
+each main query. Raw results/plans/logs/datasets remain ignored. Source is
+checkpoint441f907cf6 (same tested source diff SHA25671881cb2b7a0f50d29ea8e6de902984c4aafddf0b6b474dfb0d01da27cfca6d4
+against9ee4d297b3). Optimized default-O2 build, assertions off, GCC14.2,
+AMD EPYC9V74/KVM with5exposed vCPU and33GiB RAM. Full TPC-H SF1 default dbgen/
+qgen seed/substitutions, generator32f1c1b92d1664dba542e927d23d86ffa57aa253;
+standard May2013 JOB queries a39603662e023e449cb2121997a5034df9e02ebf,
+all21tables/standard PK+FK indexes. Exact/scaled paper data is deterministic.
+Settings, generation SQL, warmup/three-repeat/interleaving/median method and
+30s/120s caps are detailed below. Blank native full-paper fields mean timeout,
+not zero. `counterfactual_min_cost`/`native_join_reference_cost` are diagnostic
+planner cost units with candidate admission disabled, not execution times or
+actual cost losses. Indexed/parallel native alternatives remained enabled.
 
 ## Current automatic integration validation (2026-10-31)
 

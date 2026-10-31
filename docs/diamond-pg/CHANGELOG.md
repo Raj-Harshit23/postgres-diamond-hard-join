@@ -1,5 +1,14 @@
 # Diamond-PG changelog
 
+## 2026-10-31 - Preserve reviewed per-query benchmark evidence
+
+Checkpoint441f907cf6 contains the tested bounded source/diagnosis. Added one
+compact versioned benchmark-results.csv with all138 measurements/timeouts,
+actual selection/row verification and main-query planner-gate diagnosis.
+Reviewed against raw summaries;137paired bags agree, full-paper native times
+out. Config/source/data revisions/method are in TESTING.md; raw data/logs stay
+ignored. Source remains unchanged; paper Section4 correction is still next.
+
 ## 2026-10-31 - Authorized validated checkpoint before Section4 correction
 
 The user authorized normal commits/pushes on diamond-pg-cloud, with author and
