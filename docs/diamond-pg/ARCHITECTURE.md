@@ -1,6 +1,6 @@
 # Diamond-PG architecture
 
-Updated 2026-10-31 on `diamond-pg-cloud`, PostgreSQL20devel base
+Updated 2026-11-01 on `diamond-pg-cloud`, PostgreSQL20devel base
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`. This checkpoint preserves the tested bounded implementation.
 The source map and earlier phase descriptions below remain historical context;
 this section describes the current automatic implementation.
@@ -32,6 +32,13 @@ preorder enumeration, projections and retained memory. Predicted batching
 rejects the alternative. Costs are heuristic; estimates are not residency
 proof or measured peak RSS. The developer GUC `diamond_acyclic` defaults off
 and adds candidates; it does not force selection or change cached plans.
+
+`diamond_acyclic_force` is a diagnostic selection control. It applies only
+after the same semantic, GYO and resident-build checks succeed, so it cannot
+admit an unsupported query. A forced `DiamondPath` preserves its model startup
+and total costs in `DiamondJoin`; EXPLAIN labels the force and reports those
+costs while planner selection uses a zero-cost sentinel. This isolates cost
+model errors from execution or eligibility errors without changing the default.
 
 `createplan.c` first builds a canonical fully relational HashJoin tree with
 `diamond_member`/`diamond_head_rows` annotations. Ordinary reference fixing

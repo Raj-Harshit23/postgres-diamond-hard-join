@@ -1,5 +1,15 @@
 # Diamond-PG continuation plan
 
+## Active cost-selection validation (2026-11-01)
+
+Post-fix TPC-H SF1 returns matching bags for 22/22 queries but automatically
+selects no Diamond region. At 64MiB work_mem the planner generates candidates
+for Q3/Q8/Q9/Q10. A new off-by-default diagnostic force preserves eligibility
+and model costs. Assertion/debug forced comparisons are correct: Q3 is 1.048x
+faster, while Q8/Q9/Q10 are respectively 7.59x, 2.79x and 1.76x slower than
+native. Do not globally discount Diamond costs. Next, confirm Q3 on the
+optimized build and calibrate only the overcharged work its plan demonstrates.
+
 Updated 2026-10-31. Work only on `diamond-pg-cloud`; original `diamond-pg`
 remains at `9ee4d297b3`. PostgreSQL base remains
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`. Preserve all changes. The user now authorizes coherent validated commits and

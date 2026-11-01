@@ -2507,6 +2507,9 @@ typedef struct DiamondPath
 	List	   *clauses;		/* one equality RestrictInfo list per base */
 	List	   *head_rows;		/* Float nodes: shrinking head estimates */
 	double		memory_estimate;
+	Cost		estimated_startup_cost;
+	Cost		estimated_total_cost;
+	bool		forced;
 } DiamondPath;
 
 /*

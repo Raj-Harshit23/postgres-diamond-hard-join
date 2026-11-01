@@ -15,12 +15,21 @@ import sys
 import time
 
 w = Path(__file__).resolve().parent / '.work'
-out = w / 'bench-auto-opt'
+out = Path(os.environ.get('DIAMOND_PG_OUTPUT', w/'bench-auto-opt'))
 out.mkdir(exist_ok=True)
 env = os.environ.copy()
-env['LD_LIBRARY_PATH'] = str(w/'tools/usr/lib/x86_64-linux-gnu')
-psql = [str(w/'install-opt/bin/psql'), '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
-        '-h', str(w/'s'), '-p', '55434']
+install = Path(os.environ.get('DIAMOND_PG_INSTALL', w/'install-opt'))
+socket = os.environ.get('DIAMOND_PG_SOCKET', str(w/'s'))
+port = os.environ.get('DIAMOND_PG_PORT', '55434')
+force = os.environ.get('DIAMOND_PG_FORCE', 'off')
+query_filter = os.environ.get('DIAMOND_PG_QUERY')
+if force not in ('on', 'off'):
+    raise RuntimeError('DIAMOND_PG_FORCE must be on or off')
+tool_lib = w/'tools/usr/lib/x86_64-linux-gnu'
+if tool_lib.is_dir():
+    env['LD_LIBRARY_PATH'] = str(tool_lib)
+psql = [str(install/'bin/psql'), '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
+        '-h', socket, '-p', port]
 setup = """BEGIN; SET LOCAL statement_timeout='30s'; SET LOCAL jit=off;
 SET LOCAL diamond_hashjoin_stats=off; SET LOCAL diamond_lookup_expand=off;
 SET LOCAL diamond_independent_lookup_expand=off; SET LOCAL work_mem='64MB';
@@ -41,7 +50,11 @@ def execute(db, query, mode, explain=False, q15=False):
     timeout = 120 if db == 'diamond_micro' else 30
     settings = setup.replace("statement_timeout='30s'",
                              f"statement_timeout='{timeout}s'")
-    p = subprocess.run(psql+['-d',db],input=settings+'SET LOCAL diamond_acyclic='+mode+';\n'+query.rstrip(';\n ')+'; COMMIT;',
+    forced = force if mode == 'on' else 'off'
+    sql = (settings + 'SET LOCAL diamond_acyclic=' + mode + ';\n' +
+           'SET LOCAL diamond_acyclic_force=' + forced + ';\n' +
+           query.rstrip(';\n ') + '; COMMIT;')
+    p = subprocess.run(psql+['-d',db],input=sql,
                        env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout+10)
     elapsed = time.monotonic()-start
     if p.returncode:
@@ -136,7 +149,12 @@ def run_suite(name, db, queries):
         summary['results'].append(row)
         summary['elapsed_seconds']=time.monotonic()-started
         checkpoint(dest/'summary.json',summary)
-        print(name,path.stem,'verified',row.get('same_rows'),'medians',row['median_execution_ms'],'errors',row['errors'],flush=True)
+        selected = max((m['selected_diamond_regions']
+                        for samples in row['measurements'].values()
+                        for m in samples), default=0)
+        print(name, path.stem, 'verified', row.get('same_rows'),
+              'selected', selected, 'medians', row['median_execution_ms'],
+              'errors', row['errors'], flush=True)
     return summary
 
 if __name__=='__main__':
@@ -144,10 +162,16 @@ if __name__=='__main__':
     if 'tpch' in suites:
         paths=sorted((w/'tpch-queries').glob('*.sql'))
         if len(paths)!=22:raise RuntimeError('Expected all22 TPC-H queries')
+        if query_filter:
+            paths = [p for p in paths if p.stem == query_filter]
+            if not paths: raise RuntimeError(f'Unknown TPC-H query {query_filter}')
         run_suite('tpch-sf1','tpch_sf1',paths)
     if 'job' in suites:
         paths=sorted(p for p in (w/'job').glob('*.sql') if p.stem[0].isdigit())
         if len(paths)!=113:raise RuntimeError(f'Expected all113 JOB queries, got {len(paths)}')
+        if query_filter:
+            paths = [p for p in paths if p.stem == query_filter]
+            if not paths: raise RuntimeError(f'Unknown JOB query {query_filter}')
         run_suite('job-standard','job_cloud',paths)
 
     if 'paper' in suites:

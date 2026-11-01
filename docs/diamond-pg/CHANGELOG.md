@@ -1,5 +1,25 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Safe forced cost diagnosis
+
+Added off-by-default `diamond_acyclic_force` after all normal eligibility and
+resident-build checks. Forced plans preserve and expose the original estimated
+startup/total costs in EXPLAIN. The benchmark runner now accepts force, query,
+output, install, socket and port settings for isolated reproducible comparisons.
+TPC-H Q3/Q8/Q9/Q10 forced bags match native; Q3 is 1.048x faster on the debug
+build while the other three are materially slower. Added a forced-plan cost and
+bag regression; focused 1/1 and full core 240/240 pass. No automatic cost was
+changed and no optimized forced speedup is claimed yet.
+
+## 2026-11-01 - Reproducible post-fix benchmark run
+
+Reconstructed TPC-H SF1 in the ignored persistent workspace with the documented
+generator revision, eight standard tables, realistic join indexes and ANALYZE.
+Made the existing benchmark runner accept explicit install/socket/port settings
+and print the selected Diamond-region count in each live progress line. Added
+one rerunnable optimized-build/server/runner command to TESTING.md. No timing or
+selection result is claimed until that post-fix run completes.
+
 ## 2026-11-01 - Finalize the bounded acyclic cloud branch
 
 Pulled and reviewed `diamond-pg-cloud` at `2cb5c37062`. Confirmed the three

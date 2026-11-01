@@ -29,7 +29,7 @@ partial-region/early-Expand search is not claimed by this bounded milestone.
 |2 immediate Lookup/Expand | Complete,c169183521 | Prior focused/core passes; historical sanitizer startup blocker |
 |3 independent/nested ownership | Bounded implementation complete;0aa87a8624 plus this retained-build checkpoint | Owned probes, private sidecars, epochs, actual allocation/batch guards; nested/rewind/resource tests pass |
 |4 acyclic planning | Conservative native checkpoint | EC/GYO, each-root candidates, stars/chains/branching and redundant-EC tests pass; eligibility remains restricted |
-|5 costing/selection | Heuristic native cost competition and pre-output runtime fallback implemented | Selected and native-winning cases, actual-memory fallback, cached plans pass; performance calibration remains evidence-dependent |
+|5 costing/selection | Heuristic native cost competition, safe diagnostic force and pre-output runtime fallback implemented | Q3 suggests conservative cost; Q8/Q9/Q10 forced runs validate rejection; optimized confirmation remains |
 |6 Expand3 | Outside this milestone | No cyclic optimizer implemented |
 |7 robustness extension | Outside this milestone | Initial resident-storage safety/cost is implemented; general spill/risk calibration remains future work |
 |8 relevant evaluation | Benchmark attempts and feasible memory diagnostics complete | TPC-H22/22 and JOB113/113 bags agree, no Diamond selections; scaled paper219.6x/907.6x, full N50000 automatic 23.877ms/native 120s timeout |
@@ -43,6 +43,9 @@ indexes and parallel alternatives remain. Runtime rejection can select native
 only before any output; after output there is no restart. No general deferred
 spill, arbitrary expression/cross-residual scheduling or exhaustive join-tree
 search is implemented. Memory diagnostic startup failures remain visible.
+
+Current calibration target is narrow: explain Q3's false cost rejection without
+making Q8/Q9/Q10 win. Global cost discounting is ruled out by the forced runs.
 
 ## Completed acceptance and explicit limitations
 

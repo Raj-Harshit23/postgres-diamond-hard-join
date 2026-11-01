@@ -789,4 +789,17 @@ select not exists (
   (table auto_memory_fallback except all
    select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c))
 ) as automatic_actual_memory_native_bag;
+-- Cost forcing is diagnostic only and still requires an eligible plan.
+set local diamond_acyclic=on;
+set local diamond_acyclic_force=on;
+select exists (
+  select from diamond_plan(
+    'select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)',
+    false) p
+  where p->>'Node Type'='Diamond Join'
+    and (p->>'Diamond Forced')::boolean
+    and (p->>'Diamond Estimated Total Cost')::numeric > 0
+) as automatic_force_reports_estimate;
+select auto_same_rows('select r.a,s.a as sa,t.b from auto_root r join auto_s s using(a) join auto_t t using(b)',2) as automatic_force_bag;
+set local diamond_acyclic_force=off;
 rollback;

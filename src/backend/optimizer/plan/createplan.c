@@ -4475,6 +4475,9 @@ create_diamond_join_plan(PlannerInfo *root, DiamondPath *path)
 	innerPlan(join) = (Plan *) projection;
 	join->plan.targetlist = build_path_tlist(root, &path->path);
 	join->memory_estimate = path->memory_estimate;
+	join->estimated_startup_cost = path->estimated_startup_cost;
+	join->estimated_total_cost = path->estimated_total_cost;
+	join->forced = path->forced;
 	copy_generic_path_info(&join->plan, &path->path);
 	return (Plan *) join;
 }

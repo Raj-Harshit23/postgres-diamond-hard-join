@@ -818,6 +818,13 @@
   boot_val => 'false',
 },
 
+{ name => 'diamond_acyclic_force', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Forces an eligible acyclic Diamond alternative for diagnostics.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'diamond_acyclic_force',
+  boot_val => 'false',
+},
+
 { name => 'diamond_hashjoin_stats', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Collects native hash join probe and match counts for EXPLAIN ANALYZE.',
   flags => 'GUC_NOT_IN_SAMPLE',

@@ -18,6 +18,7 @@
 
 bool		diamond_independent_lookup_expand = false;
 bool		diamond_acyclic = false;
+bool		diamond_acyclic_force = false;
 
 /* A single origin lets fallback distinguish our guard from arbitrary SQL errors. */
 void

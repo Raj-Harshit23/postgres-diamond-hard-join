@@ -1,5 +1,65 @@
 # Building and testing Diamond-PG
 
+## Forced eligible-candidate diagnosis (2026-11-01)
+
+The post-fix optimized automatic run returned equal bags for all 22 TPC-H SF1
+queries and selected zero Diamond regions. Planner DEBUG1 at 64MiB identified
+four candidates: Q3 355075.52 versus native 257390.71; Q8 best 415499.65 versus
+77614.75; Q9 best 446849.74 versus 37250.59; Q10 best 274090.74 versus
+194299.97. The remaining queries stop on relation count, subquery/boundary,
+cycle or other documented eligibility gates.
+
+`diamond_acyclic_force=on` was then tested on the assertion/debug build without
+bypassing eligibility. All four forced bags match native. Median native/forced
+milliseconds were Q3 1666.220/1589.678, Q8 181.826/1380.026, Q9
+6991.104/19493.415 and Q10 1451.831/2555.121. Thus Q3 is a possible cost-model
+false negative; the other three rejections are correct. Focused 1/1 and full
+core 240/240 pass with the force/EXPLAIN regression. Raw evidence is under
+`.work/bench-force-debug*` and `.work/build-cloud/force-{build,focused,core}.log`.
+
+## Live reproducible TPC-H run
+
+The local SF1 database is `scripts/diamond-pg/.work/bench-data`; generated
+tables, cluster and raw output remain ignored. From the repository root, the
+following block creates the optimized install once, starts a private server on
+a Linux abstract socket, prints one correctness/selection/timing line per query,
+saves the same progress, and always stops the server:
+
+```sh
+diamond_src="$PWD"
+diamond_work="$diamond_src/scripts/diamond-pg/.work"
+diamond_build="$diamond_work/build-opt"
+diamond_install="$diamond_work/install-opt"
+if [ ! -x "$diamond_install/bin/postgres" ]; then
+  mkdir -p "$diamond_build"
+  (
+    cd "$diamond_build"
+    "$diamond_src/configure" --prefix="$diamond_install" --enable-depend
+    make -j"$(nproc)"
+    make install
+  )
+fi
+mkdir -p "$diamond_work/bench-auto-opt"
+(
+  set -e
+  "$diamond_install/bin/pg_ctl" -D "$diamond_work/bench-data" \
+    -l "$diamond_work/bench-server.log" \
+    -o "-k @diamond-pg-bench -p 55434 -c listen_addresses='' \
+        -c shared_buffers=1GB -c work_mem=64MB \
+        -c hash_mem_multiplier=2 -c jit=off" -w start
+  trap '"$diamond_install/bin/pg_ctl" -D "$diamond_work/bench-data" -m fast -w stop' EXIT
+  PYTHONUNBUFFERED=1 \
+  DIAMOND_PG_INSTALL="$diamond_install" \
+  DIAMOND_PG_SOCKET=@diamond-pg-bench \
+  python3 -u scripts/diamond-pg/benchmark.py tpch 2>&1 | \
+    tee "$diamond_work/bench-auto-opt/tpch-live.log"
+)
+```
+
+Reruns use the same block; the optimized build is skipped when already
+installed. Machine-readable per-query plans and the checkpointed summary are
+under `.work/bench-auto-opt/tpch-sf1/`.
+
 ## 2026-11-01 local cloud-branch verification
 
 The fetched `diamond-pg-cloud` head `2cb5c37062` was configured and rebuilt in

@@ -1111,6 +1111,9 @@ typedef struct DiamondJoin
 {
 	Plan		plan;
 	double		memory_estimate;
+	Cost		estimated_startup_cost;
+	Cost		estimated_total_cost;
+	bool		forced;
 } DiamondJoin;
 
 /* ----------------

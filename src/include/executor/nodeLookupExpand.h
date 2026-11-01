@@ -10,6 +10,7 @@
 
 extern PGDLLIMPORT bool diamond_independent_lookup_expand;
 extern PGDLLIMPORT bool diamond_acyclic;
+extern PGDLLIMPORT bool diamond_acyclic_force;
 
 /* Internal pre-output resource signal; never catch unrelated SQL errors. */
 #define ERRCODE_DIAMOND_RESOURCE MAKE_SQLSTATE('D', 'P', '0', '0', '1')

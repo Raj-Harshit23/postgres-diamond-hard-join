@@ -13052,6 +13052,23 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-acyclic-force" xreflabel="diamond_acyclic_force">
+      <term><varname>diamond_acyclic_force</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>diamond_acyclic_force</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: choose an eligible <literal>diamond_acyclic</literal>
+        alternative regardless of cost for diagnostic execution. The default
+        is <literal>off</literal>. This never bypasses semantic, acyclicity,
+        residency or planner-boundary checks. <command>EXPLAIN</command>
+        reports both that selection was forced and the original model costs.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-diamond-independent-lookup-expand" xreflabel="diamond_independent_lookup_expand">
       <term><varname>diamond_independent_lookup_expand</varname> (<type>boolean</type>)
       <indexterm>

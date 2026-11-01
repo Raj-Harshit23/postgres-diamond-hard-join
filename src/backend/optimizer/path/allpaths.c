@@ -4162,8 +4162,21 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 		diamond->order = lappend_int(diamond->order, bms_singleton_member(active));
 		if (!cost_diamond_path(root, diamond))
 			continue;
+		diamond->estimated_startup_cost = diamond->path.startup_cost;
+		diamond->estimated_total_cost = diamond->path.total_cost;
+		diamond->forced = diamond_acyclic_force;
 		elog(DEBUG1, "Diamond acyclic cost %.2f versus native cost %.2f",
 			 diamond->path.total_cost, joinrel->cheapest_total_path->total_cost);
+		/*
+		 * Diagnostic forcing changes selection only after semantic, residency and
+		 * GYO checks pass.  Preserve the model costs above for EXPLAIN.
+		 */
+		if (diamond->forced)
+		{
+			diamond->path.startup_cost = 0;
+			diamond->path.total_cost = 0;
+			diamond->path.disabled_nodes = 0;
+		}
 		add_path(joinrel, (Path *) diamond);
 	}
 	set_cheapest(joinrel);

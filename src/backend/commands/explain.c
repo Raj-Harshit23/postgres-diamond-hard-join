@@ -2205,6 +2205,14 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_DiamondJoin:
 			ExplainPropertyFloat("Diamond Estimated Live Bytes", NULL,
 								 ((DiamondJoin *) plan)->memory_estimate, 0, es);
+			if (((DiamondJoin *) plan)->forced)
+			{
+				ExplainPropertyBool("Diamond Forced", true, es);
+				ExplainPropertyFloat("Diamond Estimated Startup Cost", NULL,
+								 ((DiamondJoin *) plan)->estimated_startup_cost, 2, es);
+				ExplainPropertyFloat("Diamond Estimated Total Cost", NULL,
+								 ((DiamondJoin *) plan)->estimated_total_cost, 2, es);
+			}
 			if (es->analyze)
 				ExplainPropertyBool("Diamond Runtime Fallback",
 									((DiamondJoinState *) planstate)->fallback, es);
