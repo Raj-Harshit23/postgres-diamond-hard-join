@@ -31,7 +31,7 @@ partial-region/early-Expand search is not claimed by this bounded milestone.
 |5 costing/selection | Heuristic native cost competition, safe diagnostic force and pre-output runtime fallback implemented | Q3 suggests conservative cost; Q8/Q9/Q10 forced runs validate rejection; optimized confirmation remains |
 |6 Expand3 | Outside this milestone | No cyclic optimizer implemented |
 |7 robustness extension | Outside this milestone | Initial resident-storage safety/cost is implemented; general spill/risk calibration remains future work |
-|8 relevant evaluation | Final microbenchmark complete; real suites retain prior baseline | Final source: paper N1000/N5000 201.0x/669.3x; N50000 automatic 30.785ms/native >120s. Prior TPC-H22/22 and JOB113/113 bags agree with no selections |
+|8 relevant evaluation | Final microbenchmark and TPC-H complete; JOB prepared runner added | Paper N1000/N5000 201.0x/669.3x; N50000 automatic 30.785ms/native >120s. Final TPC-H22/22 bags agree, zero selections, geometric ratio 1.00107; final JOB rerun pending load |
 
 Final current-source assertion/debug/header-dependent build: focused 1/1 and
 full core 240/240 pass, including a forced GEQO four-relation chain with three

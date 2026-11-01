@@ -1,5 +1,21 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Portable benchmark runners and final TPC-H SF1
+
+Added three small public entry scripts backed by one shared runner. They rebuild
+from the current checkout, validate datasets, isolate/start/stop the server,
+record commit metadata, and invoke the existing correctness/timing engine.
+Paper data is generated locally; TPC-H/JOB never download multi-GB inputs, and
+JOB loading is explicit with `DIAMOND_PG_PREPARE=1`. Added a one-command N=5000
+plan demo, `DIAMOND_PG_WORK`/single-query/timeout controls, and live per-query
+speedup plus suite geometric summaries. Each completed query checkpoints its
+tracked compact-CSV row without changing its planner-diagnosis columns.
+
+Final-source TPC-H completed 22/22 matching bags without errors, timeouts, or
+Diamond selections. The geometric native/automatic ratio is 1.00107; Q18
+runtime variance makes summed medians misleading. Raw plans/live output remain
+on the Data disk and the compact CSV is updated.
+
 ## 2026-11-01 - Final-source paper acyclic microbenchmark
 
 Rebuilt the optimized install from `51f18a8781`, recreated the documented

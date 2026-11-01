@@ -80,8 +80,9 @@ The final assertion/debug build passes focused `diamond_hashjoin` 1/1 and all
 Diamond selection. On final commit `51f18a8781`, paper acyclic N=1000/5000
 selected Diamond and measured 201.0x/669.3x native-over-automatic medians;
 N=50000 completed automatically in 30.785ms while native exceeded 120s.
-A current external-disk TPC-H attempt verified Q1--Q4 bags with no selection, then Q5 timed out in both modes;
-these slow storage-bound measurements do not replace the completed baseline.
+The final-source external-disk TPC-H SF1 run completed 22/22 matching bags
+with no errors or Diamond selections; its per-query geometric ratio was 1.00107,
+so it establishes neutral native behavior rather than a Diamond gain.
 
 ## First correction: pruning-independent inputs/fallback
 

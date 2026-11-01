@@ -11,10 +11,10 @@ cost, and only single-batch fully expanded paths enter `add_path`.
 Final assertion/debug compilation, focused `diamond_hashjoin` 1/1 (37.049s),
 and core 240/240 pass. The new GEQO oracle executes a four-table chain with
 three Lookup/Expand pairs and matches the native bag. The external optimized
-build also compiled, but the current TPC-H rerun on the moved hard-disk cluster
-was stopped after Q1--Q4 matched with no selection and Q5 timed out in both
-modes. Retain the earlier completed SF1/JOB CSV as benchmark evidence; do not
-combine the storage-bound partial run with it.
+build and full TPC-H SF1 rerun completed: 22/22 bags match, no errors/timeouts,
+and zero Diamond selections. The per-query geometric native/automatic ratio is
+1.00107; total medians are skewed by Q18 runtime variance despite an identical
+plan structure. Raw plans and the updated CSV preserve the evidence.
 
 Final-commit paper microbenchmark results are saved: N=1000
 212.040/1.055ms native/automatic (200.99x), N=5000 2625.554/3.923ms

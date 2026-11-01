@@ -1,5 +1,78 @@
 # Building and testing Diamond-PG
 
+## Demo and portable benchmark entry points
+
+Install normal PostgreSQL build dependencies once (Ubuntu/Debian example), then
+build and run from the repository root. Password entry stays in this terminal.
+
+```sh
+sudo apt install build-essential flex bison libreadline-dev zlib1g-dev \
+  libicu-dev pkg-config python3
+git switch diamond-pg-cloud
+git pull --ff-only origin diamond-pg-cloud
+```
+
+The paper microbenchmark is self-contained: its script builds an optimized
+server, creates a private cluster/database, generates all three scales, compares
+native and automatic execution, saves raw JSON, and stops the server.
+
+```sh
+scripts/diamond-pg/run-paper-microbenchmark.sh
+```
+
+For the live professor demo, N=5000 finishes quickly and prints both readable
+EXPLAIN ANALYZE plans after the measured comparison:
+
+```sh
+DIAMOND_PG_QUERY=n05000 DIAMOND_PG_DEMO=1 \
+  scripts/diamond-pg/run-paper-microbenchmark.sh
+```
+
+The query is `X(a,b) JOIN Y(b,c) JOIN Z(c,d)`. At N=5000, X and Z have 5,001
+rows and Y has 9,996. Native execution expands the many `b=2` matches first,
+forming 24,985,001 rows that the Z join later discards. Diamond scans Y as the
+head, uses Lookup into X to retain 4,998 possible heads, then Lookup into Z to
+retain one. The two iterators are expanded only after filtering, producing the
+same sole `(1,1,1,1)` row. This changes the dangerous intermediate from
+quadratic work to approximately linear hash build/probe work.
+
+TPC-H and JOB use their standard multi-GB datasets and query sets from the
+portable benchmark workspace; the scripts never download them implicitly.
+Point both runners at that workspace (the Data-disk path on this machine is
+shown below):
+
+```sh
+export DIAMOND_PG_WORK=/media/harshit/data/2026-11-01/cloud-did-its-work-on-a/repository/scripts/diamond-pg/.work
+scripts/diamond-pg/run-tpch-benchmark.sh
+
+# First JOB run only: load the 21 already-unpacked May 2013 CSVs and indexes.
+DIAMOND_PG_PREPARE=1 scripts/diamond-pg/run-job-benchmark.sh
+# Later JOB reruns use the loaded database directly.
+scripts/diamond-pg/run-job-benchmark.sh
+```
+
+Use `DIAMOND_PG_QUERY=03` or `DIAMOND_PG_QUERY=1a` before the corresponding
+TPC-H/JOB command for a quick single-query check. After the first build,
+`DIAMOND_PG_SKIP_BUILD=1` skips recompilation when the source has not changed.
+On a slower laptop, `DIAMOND_PG_TIMEOUT=120` raises the per-query TPC-H/JOB
+limit from 30 to 120 seconds. The live output reports correctness, both
+medians, native/automatic speedup, selections, errors, and a suite geometric
+ratio. Each script checks query counts and nonempty databases, records the Git
+commit/server identity, saves results under
+`$DIAMOND_PG_WORK/bench-final-<suite>/`, and stops its server even on failure.
+
+Raw plans, result bags and JSON summaries stay in ignored `.work` storage.
+Each completed query also updates its existing row in the tracked compact CSV,
+while preserving planner-diagnosis columns. Review that diff, then commit only
+the compact results and any accurate documentation:
+
+```sh
+git status --short
+git add scripts/diamond-pg docs/diamond-pg
+git commit -m "diamond-pg: record reviewed benchmark results"
+git push origin diamond-pg-cloud
+```
+
 ## Final minimized-expression memo and GEQO validation (2026-11-01)
 
 From the repository root, the final source was formatted and validated with:
@@ -37,10 +110,13 @@ used no runtime fallback, and wrote no temp blocks. Raw JSON and the live log
 are in the Data-disk `.work/bench-section4-paper-final/` paths; compact results
 are versioned in `benchmark-results.csv`.
 
-A storage-bound TPC-H rerun produced matching Q1--Q4 bags and zero Diamond
-selections; Q5 timed out in both modes, so it was stopped. The prior completed
-22/22 TPC-H and 113/113 JOB bag evidence remains the real-suite baseline. No
-new JOB runtime claim is made from the incomplete copied database.
+The final-source TPC-H SF1 rerun completed all 22 queries in 263.23s with
+matching bags, no errors/timeouts, and zero Diamond selections. Sum of medians
+was 18.083764s native and 19.375675s automatic; Q18 runtime variance accounts
+for more than the difference, while the per-query geometric native/automatic
+ratio is 1.00107. Paired operator/condition structures are identical after
+excluding runtime counters. This establishes correctness and neutral TPC-H
+behavior, not a Diamond speedup. JOB still requires loading the copied CSVs.
 
 ## Forced eligible-candidate diagnosis (2026-11-01)
 

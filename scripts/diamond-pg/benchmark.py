@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Compare native and automatic Diamond plans in the preserved .work datasets.
 
-Use TESTING.md for optimized build, database loading and identical settings.
-Raw results/checkpoints stay ignored under .work; this script never changes
-schema or source. Optional suite names: tpch, job, paper (default: all).
+Use TESTING.md or the dedicated shell entry points for build/data setup.
+DIAMOND_PG_WORK selects the persistent dataset workspace. Raw results remain
+ignored there; this script never changes schema or source. Optional suites:
+tpch, job, paper (default: all).
 """
+import csv
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import statistics
@@ -14,7 +17,7 @@ import subprocess
 import sys
 import time
 
-w = Path(__file__).resolve().parent / '.work'
+w = Path(os.environ.get('DIAMOND_PG_WORK', Path(__file__).resolve().parent / '.work'))
 out = Path(os.environ.get('DIAMOND_PG_OUTPUT', w/'bench-auto-opt'))
 out.mkdir(exist_ok=True)
 env = os.environ.copy()
@@ -47,7 +50,10 @@ def execute(db, query, mode, explain=False, q15=False):
         else:
             query = 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + query
     start = time.monotonic()
-    timeout = 120 if db == 'diamond_micro' else 30
+    timeout = int(os.environ.get('DIAMOND_PG_TIMEOUT',
+                                 120 if db == 'diamond_micro' else 30))
+    if timeout <= 0:
+        raise RuntimeError('DIAMOND_PG_TIMEOUT must be a positive number of seconds')
     settings = setup.replace("statement_timeout='30s'",
                              f"statement_timeout='{timeout}s'")
     forced = force if mode == 'on' else 'off'
@@ -72,6 +78,38 @@ def checkpoint(path, data):
     tmp.write_text(json.dumps(data,indent=2))
     tmp.replace(path)
 
+def update_compact(name, result):
+    # Checkpoint one reviewed-size row while keeping diagnosis columns.
+    path = Path(__file__).with_name('benchmark-results.csv')
+    with path.open(newline='') as f:
+        reader = csv.DictReader(f)
+        fields, rows = reader.fieldnames, list(reader)
+    for row in rows:
+        if row['suite'] != name or row['query'] != result['query']:
+            continue
+        samples = [m for values in result['measurements'].values() for m in values]
+        medians = result['median_execution_ms']
+        row.update({
+            'same_bag': str(result.get('same_rows', '')),
+            'native_ms': medians.get('off', ''),
+            'automatic_ms': medians.get('on', ''),
+            'native_over_automatic': result.get('ratio_native_over_automatic', ''),
+            'selected_diamond': max((m['selected_diamond_regions'] for m in samples), default=0),
+            'executed_lookup': max((m['executed_lookups'] for m in samples), default=0),
+            'executed_expand': max((m['executed_expands'] for m in samples), default=0),
+            'runtime_fallback': any(m['runtime_native_fallback'] for m in samples),
+            'errors': json.dumps(result['errors'], sort_keys=True),
+        })
+        break
+    else:
+        raise RuntimeError(f'Missing compact-result row for {name} {result["query"]}')
+    tmp = path.with_suffix('.tmp')
+    with tmp.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields, lineterminator='\n')
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp.replace(path)
+
 def run_suite(name, db, queries):
     """Verify bags, then alternate modes and retain every raw measured plan.
 
@@ -80,7 +118,8 @@ def run_suite(name, db, queries):
     """
     dest=out/name
     dest.mkdir(exist_ok=True)
-    timeout = 120 if name == 'paper-acyclic' else 30
+    timeout = int(os.environ.get('DIAMOND_PG_TIMEOUT',
+                                 120 if name == 'paper-acyclic' else 30))
     summary = {
         'suite': name, 'database': db,
         'method': ('native/automatic, identical optimized build and settings; '
@@ -149,12 +188,25 @@ def run_suite(name, db, queries):
         summary['results'].append(row)
         summary['elapsed_seconds']=time.monotonic()-started
         checkpoint(dest/'summary.json',summary)
+        update_compact(name, row)
         selected = max((m['selected_diamond_regions']
                         for samples in row['measurements'].values()
                         for m in samples), default=0)
+        ratio = row.get('ratio_native_over_automatic')
         print(name, path.stem, 'verified', row.get('same_rows'),
               'selected', selected, 'medians', row['median_execution_ms'],
+              'speedup', f'{ratio:.2f}x' if ratio else 'n/a',
               'errors', row['errors'], flush=True)
+    paired = [r for r in summary['results'] if 'ratio_native_over_automatic' in r]
+    selected = sum(max((m['selected_diamond_regions']
+                        for samples in r['measurements'].values()
+                        for m in samples), default=0) for r in summary['results'])
+    if paired:
+        geometric = math.exp(statistics.mean(
+            math.log(r['ratio_native_over_automatic']) for r in paired))
+        print(name, 'complete:', len(paired), 'verified pairs,', selected,
+              'Diamond selections, geometric native/automatic',
+              f'{geometric:.3f}x', flush=True)
     return summary
 
 if __name__=='__main__':
@@ -175,4 +227,9 @@ if __name__=='__main__':
         run_suite('job-standard','job_cloud',paths)
 
     if 'paper' in suites:
-        run_suite('paper-acyclic','diamond_micro',sorted((w/'paper-acyclic-queries').glob('*.sql')))
+        paths=sorted((w/'paper-acyclic-queries').glob('*.sql'))
+        if len(paths)!=3:raise RuntimeError(f'Expected all3 paper queries, got {len(paths)}')
+        if query_filter:
+            paths = [p for p in paths if p.stem == query_filter]
+            if not paths: raise RuntimeError(f'Unknown paper query {query_filter}')
+        run_suite('paper-acyclic','diamond_micro',paths)
