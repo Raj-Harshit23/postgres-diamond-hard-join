@@ -16,6 +16,12 @@ was stopped after Q1--Q4 matched with no selection and Q5 timed out in both
 modes. Retain the earlier completed SF1/JOB CSV as benchmark evidence; do not
 combine the storage-bound partial run with it.
 
+Final-commit paper microbenchmark results are saved: N=1000
+212.040/1.055ms native/automatic (200.99x), N=5000 2625.554/3.923ms
+(669.27x), and N=50000 automatic 30.785ms with native timing out at 120s.
+All comparable bags match; every automatic plan selected one Diamond region
+and executed two Lookups/two Expands without fallback or temp I/O.
+
 Remaining optimizer scope is explicit: connected partial regions, boundary-
 driven early Expand, cyclic Expand3, and deferred spilling. The admitted
 bounded acyclic two-phase region is integrated and correct.

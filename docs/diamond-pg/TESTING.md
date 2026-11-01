@@ -26,14 +26,21 @@ discarded a candidate; immutable template base paths now remain the source for
 later roots. Full-cost singleton-state comparison restored the previously
 selected chain. The final assertion runs above cover both fixes.
 
-The optimized build was rebuilt against this checkout on the external data
-disk. A storage-bound TPC-H rerun produced matching Q1--Q4 bags and zero
-Diamond selections; Q5 timed out at 30s in both modes, so the run was stopped.
-Those figures are not comparable with the prior completed optimized run. The
-versioned `benchmark-results.csv` remains the valid completed evidence: 22/22
-TPC-H and 113/113 JOB bags matched native, with zero automatic selections, and
-the paper acyclic N=1000/5000 cases selected Diamond at 219.6x/907.6x median
-speedups. No new JOB runtime claim is made from the incomplete copied database.
+The optimized build was rebuilt from final commit `51f18a8781` on the Data
+disk. The paper acyclic runner used identical settings, one bag-check warmup,
+and three interleaved EXPLAIN ANALYZE repetitions. N=1000 measured
+212.040/1.055ms native/automatic (200.99x); N=5000 measured
+2625.554/3.923ms (669.27x). Both bags match. N=50000 automatic measured
+30.785ms; native exceeded the 120s limit, so no paired ratio is reported. Every
+automatic plan selected one Diamond region, executed two Lookups/two Expands,
+used no runtime fallback, and wrote no temp blocks. Raw JSON and the live log
+are in the Data-disk `.work/bench-section4-paper-final/` paths; compact results
+are versioned in `benchmark-results.csv`.
+
+A storage-bound TPC-H rerun produced matching Q1--Q4 bags and zero Diamond
+selections; Q5 timed out in both modes, so it was stopped. The prior completed
+22/22 TPC-H and 113/113 JOB bag evidence remains the real-suite baseline. No
+new JOB runtime claim is made from the incomplete copied database.
 
 ## Forced eligible-candidate diagnosis (2026-11-01)
 
@@ -238,8 +245,8 @@ paper/star-shaped EXPLAINs confirmed that boundary, and the false paper gate
 returned zero rows. Evidence: `.work/gating-review-{before,fixture}.log`.
 No source change or benchmark restart was needed.
 
-Completed scaled paper measurements (exact formula, normal native alternatives,
-three interleaved repetitions, one expected tuple in both modes):
+Earlier checkpoint 441f907cf6 scaled paper measurements (retained for
+historical comparison; final-commit results are recorded above):
 
 |N|Native median ms|Automatic median ms|Native/automatic|Executed Lookup/Expand|
 |---|---:|---:|---:|---:|

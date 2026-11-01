@@ -134,6 +134,6 @@ job-standard,9a,True,152.974,147.463,1.037372086557306,0,0,0,False,{},no_native_
 job-standard,9b,True,130.732,130.938,0.9984267363179521,0,0,0,False,{},no_native_skeleton,,1196769.290022,83281.023138
 job-standard,9c,True,243.174,232.153,1.0474730027180352,0,0,0,False,{},no_native_skeleton,,,
 job-standard,9d,True,2235.687,2241.179,0.9975495040779875,0,0,0,False,{},no_native_skeleton,,,
-paper-acyclic,n01000,True,128.031,0.583,219.60720411663812,1,2,2,False,{},selected_paper,,,
-paper-acyclic,n05000,True,2254.423,2.484,907.5776972624798,1,2,2,False,{},selected_paper,,,
-paper-acyclic,n50000,,,23.877,,1,2,2,False,"{""off"": ""ERROR:  canceling statement due to statement timeout""}",selected_paper,,,
+paper-acyclic,n01000,True,212.04,1.055,200.98578199052133,1,2,2,False,{},selected_paper,,,
+paper-acyclic,n05000,True,2625.554,3.923,669.2719857252104,1,2,2,False,{},selected_paper,,,
+paper-acyclic,n50000,,,30.785,,1,2,2,False,"{""off"": ""ERROR:  canceling statement due to statement timeout""}",selected_paper,,,

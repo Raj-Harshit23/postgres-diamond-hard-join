@@ -1,5 +1,15 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Final-source paper acyclic microbenchmark
+
+Rebuilt the optimized install from `51f18a8781`, recreated the documented
+deterministic N=1000/5000/50000 database, and ran the existing interleaved
+runner. Matching N=1000 and N=5000 bags measured 200.99x and 669.27x speedups.
+N=50000 automatic completed in 30.785ms; native exceeded 120s. All automatic
+plans selected one Diamond region, executed two Lookups/two Expands, and used
+no fallback or temp I/O. Updated the existing result CSV and project records;
+raw plans and logs remain ignored on the Data disk.
+
 ## 2026-11-01 - Integrate bounded Section 4 acyclic state search
 
 Changed `allpaths.c` so Diamond candidate generation runs after standard, GEQO,
