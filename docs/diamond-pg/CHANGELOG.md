@@ -1,5 +1,16 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Finalize the bounded acyclic cloud branch
+
+Pulled and reviewed `diamond-pg-cloud` at `2cb5c37062`. Confirmed the three
+cloud commits use `harshit <harshitraj969@gmail.com>` as both author and
+committer with no co-author trailer. Reclassified the handoff accurately: the
+documented 3--16 relation acyclic milestone is complete; a generalized
+partial-region/early-Expand memo would broaden the search space and remains
+future work. No production semantics, eligibility gate, cost constant or
+benchmark result changed. Fresh local build/regression evidence is recorded in
+TESTING.md; generated output remains ignored under `scripts/diamond-pg/.work/`.
+
 ## 2026-10-31 - Independent native inputs and serial fallback
 
 Removed the already-pruned pure HashPath/SeqScan-survivor prerequisite.

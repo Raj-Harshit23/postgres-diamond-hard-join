@@ -1,9 +1,17 @@
 # Building and testing Diamond-PG
 
-This validated bounded implementation/diagnosis was committed as441f907cf6 with
-user-authorized normal commit/push and user authorship. Paper Section4
-correction (GEQO excluded) remains the next milestone; none of its proposed
-changes is implied by the validation results below.
+## 2026-11-01 local cloud-branch verification
+
+The fetched `diamond-pg-cloud` head `2cb5c37062` was configured and rebuilt in
+`scripts/diamond-pg/.work/build-cloud` with `--enable-cassert --enable-debug
+--enable-depend`. Compilation passed, the focused `diamond_hashjoin` regression
+passed 1/1, and the full core suite passed 240/240. Logs are `configure.log`,
+`build.log`, `focused.log` and `core.log` in that ignored build directory.
+
+The bounded implementation/diagnosis was committed as `441f907cf6`; benchmark
+evidence followed in `76a429556e`, and independent scan/fallback construction
+in `2cb5c37062`. General partial-region and early-Expand search remains future
+work and is not implied by the validation results below.
 
 Versioned per-query results are
 [`benchmark-results.csv`](../../scripts/diamond-pg/benchmark-results.csv):

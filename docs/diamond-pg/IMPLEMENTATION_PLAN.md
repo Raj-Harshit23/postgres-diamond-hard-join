@@ -1,23 +1,24 @@
 # Diamond-PG implementation plan
 
-Updated 2026-10-31. Validated checkpoint on `diamond-pg-cloud`; original
+Updated 2026-11-01. Validated checkpoint on `diamond-pg-cloud`; original
 `diamond-pg` remains 9ee4d297b3. User authorization covers nested Phase 3,
 acyclic Phase 4, cost selection Phase 5 and relevant Phase 8 evaluation.
 Architecture and continuation details are in ARCHITECTURE.md and EXECPLAN.md.
 
-Next authorized milestone: integrate paper Section4 comparable minimized L&E
-states, boundary/early Expand alternatives and native composition, excluding
-GEQO. Decouple legal scan/fallback construction from pruned native survivors.
-No correction source is included in this checkpoint. User authorizes normal
-commits/pushes as harshit <harshitraj969@gmail.com>, without AI attribution.
+The bounded acyclic milestone is complete. Legal scan/fallback construction is
+decoupled from pruned native survivors, and admitted stars, chains and branching
+queries receive costed two-phase GYO alternatives. General partial-region
+states and early Expand alternatives would broaden the optimizer search space;
+they remain future work rather than a missing correctness step. GEQO remains
+native.
 
 First correction increment validated: independent canonical serial fallback,
 independently constructed heap paths and audited unparameterized native indexed
 inputs replace the original path-survivor prerequisite. Assertion focused1/1
 and full core240/240 pass, including selected IndexScan/IndexOnlyScan/BitmapHeapScan
 and indexed native resource fallback. No constants lowered, no native options
-disabled. Full paperSection4 comparable-state/boundary/earlyExpand work remains
-active; the earlier benchmark table is a published baseline, not new coverage.
+disabled. The earlier benchmark table remains the measured baseline. Broader
+partial-region/early-Expand search is not claimed by this bounded milestone.
 
 ## Current status and boundaries
 

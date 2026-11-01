@@ -10,7 +10,7 @@ The user authorized Phase 3 completion, Phase 4, Phase 5 and relevant Phase 8,
 superseding the old Phase 3-only instruction. One platform-delegated worker is
 authorized and owns editing; do not start any duplicate coding attempt.
 
-## Active correction: first independent-input/fallback increment
+## Completed correction: independent inputs and native fallback
 
 Published checkpoints are441f907cf6 (tested bounded source/diagnosis) and
 76a429556e (versioned per-query results). Remote diamond-pg-cloud SHA was
@@ -28,19 +28,15 @@ guard removed and no cost constants lowered. Assertion/header-dependent build
 passed (`.work/build/sec4-step1-build.log`). Focused1/1 in17.133s and full core240/240 now pass, with seven new reviewed
 indexed/bitmap, differential and copied/rewound indexed-fallback positive
 oracles. Logs `.work/build/sec4-step1-{build,focused,core,indent}.log`.
-This coherent first correction is ready for an authorized checkpoint.
-Diagnostic server55436 runs the corrected debug input/fallback increment;
-benchmark server55434 remains the published optimized baseline. No current
-benchmark coverage/performance change is claimed. This is NOT completion
-of paper Section4; no correction checkpoint may be committed until validated.
+This coherent correction is published as `2cb5c37062`.
+No new benchmark coverage or performance change is claimed by that correction.
 
-Next stage: a separate minimized expanded-set/Lookup-tree memo; compute native
-EC predicate boundaries, required and reliable early Expand alternatives on
-legal standard-search subsets. Only fully expanded comparable outputs enter
-ordinary add_path; preserve native reference fixing, Params/rescan/copy/read
-contracts. Native semijoin survival and conditional fanout must replace naive
-existence assumptions with evidence, without arbitrary tuning/forced choices.
-GEQO remains native. Parent read-only; no extra agent or approval is pending.
+The bounded acyclic milestone is complete: every admitted star, chain or
+branching region receives a two-phase GYO Lookup/Expand alternative and an
+independently valid serial fallback. A wider Section 4 memo with partial-region
+states and early Expand alternatives remains future search-space work; it is
+not required for correctness or completeness inside the documented admitted
+region. GEQO remains native.
 
 ## Completed follow-up: zero-coverage diagnosis
 
