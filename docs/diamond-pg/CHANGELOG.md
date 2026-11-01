@@ -1,5 +1,14 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Consolidated midterm code-reading map
+
+Added the requested `midterm-fileschanged.md`: an ordered 45-file table from
+the upstream baseline through `d26a8c3164`, exact non-comment code deltas,
+clickable source/line links, a Mermaid execution flow, collapsible phase
+explanations, demo reasoning, limitations, and a group reading sequence. The
+guide records 1,849/42 production, 1,033/0 regression-helper, and 338/0
+benchmark-tool code additions/deletions. No PostgreSQL behavior changed.
+
 ## 2026-11-01 - Portable benchmark runners and final TPC-H SF1
 
 Added three small public entry scripts backed by one shared runner. They rebuild

@@ -1,5 +1,8 @@
 # Diamond-PG architecture
 
+For an incremental, clickable midterm code-reading route, start with
+[`midterm-fileschanged.md`](midterm-fileschanged.md).
+
 Updated 2026-11-01 on `diamond-pg-cloud`, PostgreSQL 20devel base
 `6296e78c3d2c7406bb450c5ae477b2fef58f155e`. The current implementation is
 the bounded alpha-acyclic, strictly two-phase specialization of the paper's
