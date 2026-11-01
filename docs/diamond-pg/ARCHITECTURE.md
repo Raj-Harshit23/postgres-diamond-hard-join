@@ -1,61 +1,47 @@
 # Diamond-PG architecture
 
-Updated 2026-11-01 on `diamond-pg-cloud`, PostgreSQL20devel base
-`6296e78c3d2c7406bb450c5ae477b2fef58f155e`. This checkpoint preserves the tested bounded implementation.
-The source map and earlier phase descriptions below remain historical context;
-this section describes the current automatic implementation.
-
-The user subsequently requested paper Section4 integration and authorized
-normal commits/pushes with harshit as author/committer. That correction is the
-next milestone; this checkpoint implements the bounded Section3.4-style
-complete two-phase schedule, not the complete Section4 memo/boundary policy.
+Updated 2026-11-01 on `diamond-pg-cloud`, PostgreSQL 20devel base
+`6296e78c3d2c7406bb450c5ae477b2fef58f155e`. The current implementation is
+the bounded alpha-acyclic, strictly two-phase specialization of the paper's
+Section 4 state search.
 
 ## Automatic acyclic alternatives
 
-`allpaths.c:add_diamond_acyclic_path` runs after standard join search for a
-complete eligible3–16-relation inner-join region. Each relation is a hyperedge
-whose attributes are PostgreSQL EquivalenceClasses. GYO removes an ear only
-when one surviving parent contains all attributes shared with surviving
-relations. Same-EC redundant triangles are one attribute; genuine cycles have
-no ear. Each possible root is tried, with a bounded size-based ear/parent
-heuristic rather than exhaustive tree enumeration. EC-generated strict,
-same-type equalities carry native operator/collation semantics.
+`allpaths.c:add_diamond_acyclic_path` runs on the complete join relation after
+the configured PostgreSQL search method returns, so standard dynamic
+programming, GEQO, and a join-search hook can all receive the same independent
+Diamond alternative. Native paths remain in ordinary `add_path` competition.
 
-Only a fully expanded `DiamondPath` enters ordinary `add_path` competition.
-It contains base scan Paths, parent/ear order, clauses, filtered-head estimates,
-live-memory estimate. A separate ordinary serial hash fallback is built from
-the same normalized EC tree, independently of native path pruning. Native
-indexed, merge, nested-loop and parallel alternatives remain available.
-`costsize.c:cost_diamond_path` estimates native join selectivity, first-match
-head filtering, hash build/probe, owned probe and descriptor copies,
-preorder enumeration, projections and retained memory. Predicted batching
-rejects the alternative. Costs are heuristic; estimates are not residency
-proof or measured peak RSS. The developer GUC `diamond_acyclic` defaults off
-and adds candidates; it does not force selection or change cached plans.
+For each possible surviving root, a bounded memo enumerates legal GYO ear
+removals over 3--16 regular heap relations. A memo entry encodes the minimized
+L&E expression: its surviving heads and the parent forest of deferred payloads.
+States with the same relation set but different forests remain distinct, as
+required by Section 4's state-equivalence rule. Equivalent expressions retain
+the cheapest schedule; complete expressions use the full Lookup, copy, Expand,
+and enumeration cost before pruning. Equality edges are generated once from
+PostgreSQL EquivalenceClasses, preserving strict same-type hash operator and
+collation semantics and treating redundant equalities as one attribute.
 
-`diamond_acyclic_force` is a diagnostic selection control. It applies only
-after the same semantic, GYO and resident-build checks succeed, so it cannot
-admit an unsupported query. A forced `DiamondPath` preserves its model startup
-and total costs in `DiamondJoin`; EXPLAIN labels the force and reports those
-costs while planner selection uses a zero-cost sentinel. This isolates cost
-model errors from execution or eligibility errors without changing the default.
+Every transition checks that its retained hash build is predicted single-batch.
+Only a complete, fully expanded `DiamondPath` is admitted. Its base scans and
+ordinary serial hash fallback are built independently of native path pruning;
+native indexed, merge, nested-loop, and parallel alternatives remain available.
+`diamond_acyclic` defaults off and adds candidates. The diagnostic
+`diamond_acyclic_force` only selects a candidate after all semantic, acyclicity,
+and residency checks and preserves the model costs shown by EXPLAIN.
 
-`createplan.c` first builds a canonical fully relational HashJoin tree with
-`diamond_member`/`diamond_head_rows` annotations. Ordinary reference fixing
-and parameter finalization run before `create_diamond_plan_references`
-factorizes it. Children build filtered heads with retained descriptors;
-preorder Expands expose each parent before its descendants. All scan columns
-remain available until final expansion, whose projection uses the canonical
-column mapping. Deferred heads do not cross ordinary SQL executor boundaries.
+`createplan.c` first builds a canonical relational HashJoin tree, runs normal
+reference and parameter processing, then factorizes the chosen Diamond arm into
+Lookup/Expand nodes. `DiamondJoin` retains separate native and optimized Plan
+arms. A checked resource signal may choose native only before output; SQL
+errors, cancellation, and OOM propagate, and execution never restarts after a
+row has been emitted.
 
-`DiamondJoin`/`DiamondJoinState` retain two ordinary Plan arms: native and
-optimized. First pull initializes the choice: an internal, origin-checked
-resource signal (SQLSTATE DP001) may select native only before any output.
-After first output there is no restart. SQL errors, cancellation and OOM
-propagate. Rescan reinitializes a failed optimized arm; generated node
-copy/read, executor dispatch/rescan/shutdown, setrefs/finalize, EXPLAIN/deparse
-and parallel boundaries include the wrapper. EXPLAIN reports live-byte estimate
-and actual native fallback, plus per-node rows/loops when analyzed.
+This implements the complete two-phase search for the documented bounded
+acyclic region. It does not implement Section 4's broader connected-subregion
+search, predicate-boundary early Expands, Expand3, outer joins, or deferred
+spill. Those features broaden the supported/search space; they are not needed
+to execute an admitted two-phase acyclic plan correctly.
 
 ## Retained nested-build ownership
 
@@ -78,27 +64,23 @@ matches. Rescan/end invalidate epochs before cleanup. No process pointer is
 stored as a SQL Datum or raw spill payload; parallel/materialized ordinary
 consumers require full expansion.
 
-## Current eligibility and limits
+## Current eligibility and validation
 
-Complete standard-search regions only: regular heap scans, simple-column
-strict same-type hash equality ECs, immutable base filters and a retained
-serial heap/hash native skeleton. No parent-root/subplan boundary, live
-special/outer/lateral/security join, row locking, DML, placeholder or target
-SRF. Cross-relation residuals (including distributed one-time pseudoconstant
-filters), expression keys, unsupported access methods,
-GEQO/hook search and genuine cycles remain native. Upper ordinary projection
-and aggregate processing sees fully expanded tuples. There is no Expand3,
-eager aggregation, outer-join reordering or deferred spill implementation.
+A candidate covers a complete 3--16-relation SELECT region with regular heap
+relations, simple-column strict same-type hash equality ECs, immutable base
+filters, no cross-relation residual, and no live outer/lateral/security/locking,
+DML, placeholder, target-SRF, or subplan boundary. Genuine cycles and unsupported
+expressions remain native. GEQO is supported; the regression lowers
+`geqo_threshold` to force a four-relation chain through GEQO, executes three
+Lookup/Expand pairs, and verifies its result bag against native execution.
 
-Current assertion/debug focused 1/1 and core 240/240 pass. Optimized TPC-H/JOB/
-exact paper acyclic evaluation is complete. TPC-H/JOB select no Diamond.
-Scaled paper N1000/5000 automatically execute 219.6x/907.6x faster by shrinking
-heads before enumeration; full N50000 automatic median is23.877ms, while native exceeds 120s; no paired
-full-size speedup ratio is claimed. Annotated Valgrind focused SQL also passes1/1 plus partial-cursor cleanup.
-Native startup/scanner leaks and relcache/WAL uninitialized writes remain
-unsuppressed; no invalid access was reported and no clean memory pass is claimed.
-[TESTING.md](TESTING.md) records current evidence and commands;
-[EXECPLAN.md](EXECPLAN.md) records the live restart checkpoint.
+The final assertion/debug build passes focused `diamond_hashjoin` 1/1 and all
+240 core regressions. Existing optimized evidence remains: all 22 TPC-H SF1 and
+113 JOB result bags matched native at the earlier checkpoint, with no automatic
+Diamond selection; paper acyclic N=1000/5000 selected Diamond and measured
+219.6x/907.6x native-over-automatic medians. A current external-disk TPC-H
+attempt verified Q1--Q4 bags with no selection, then Q5 timed out in both modes;
+these slow storage-bound measurements do not replace the completed baseline.
 
 ## First correction: pruning-independent inputs/fallback
 
@@ -112,10 +94,12 @@ remain unchanged. Runtime owns/copied-head slot deformation works with each
 explicitly admitted native scan state. New selected-input, multiset, copy/read,
 rewind and resource-fallback tests pass; focused1/1 and core240/240 pass.
 
-This remains the complete two-phase scheduler. Comparable minimized-state,
-predicate-boundary and early-Expand integration is the next required increment;
-it is not claimed complete here. Published performance/diagnosis below belongs
-to checkpoint441f907cf6 and must not be presented as corrected-source coverage.
+The pruning-independent inputs and fallback remain part of the current
+implementation. The subsequent root-aware minimized-expression memo supersedes
+the earlier greedy scheduler. Predicate-boundary early Expand and arbitrary
+partial-region search remain outside the bounded two-phase scope. Published
+performance/diagnosis below belongs to checkpoint 441f907cf6 and is retained as
+historical evidence, not current-source performance coverage.
 
 ## Observed planner-coverage limitation
 

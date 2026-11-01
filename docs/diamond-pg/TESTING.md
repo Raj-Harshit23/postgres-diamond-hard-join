@@ -1,5 +1,40 @@
 # Building and testing Diamond-PG
 
+## Final minimized-expression memo and GEQO validation (2026-11-01)
+
+From the repository root, the final source was formatted and validated with:
+
+```sh
+src/tools/pgindent/pgindent \
+  --indent=scripts/diamond-pg/.work/build/src/tools/pg_bsd_indent/pg_bsd_indent \
+  src/backend/optimizer/path/allpaths.c
+git diff --check
+make -C scripts/diamond-pg/.work/build -j4
+make -C scripts/diamond-pg/.work/build/src/test/regress \
+  check-tests TESTS=diamond_hashjoin
+make -C scripts/diamond-pg/.work/build check
+```
+
+Compilation passed, focused `diamond_hashjoin` passed 1/1 in 37.049s, and all
+240 core regressions passed; the Diamond test took 44.292s in the core run. The
+new oracle sets `geqo_threshold=3`, forces only an already eligible candidate,
+executes a four-relation acyclic chain with three Lookup/Expand pairs, and
+compares both result bags with `EXCEPT ALL`.
+
+During development, ASan identified a planner use-after-free after `add_path`
+discarded a candidate; immutable template base paths now remain the source for
+later roots. Full-cost singleton-state comparison restored the previously
+selected chain. The final assertion runs above cover both fixes.
+
+The optimized build was rebuilt against this checkout on the external data
+disk. A storage-bound TPC-H rerun produced matching Q1--Q4 bags and zero
+Diamond selections; Q5 timed out at 30s in both modes, so the run was stopped.
+Those figures are not comparable with the prior completed optimized run. The
+versioned `benchmark-results.csv` remains the valid completed evidence: 22/22
+TPC-H and 113/113 JOB bags matched native, with zero automatic selections, and
+the paper acyclic N=1000/5000 cases selected Diamond at 219.6x/907.6x median
+speedups. No new JOB runtime claim is made from the incomplete copied database.
+
 ## Forced eligible-candidate diagnosis (2026-11-01)
 
 The post-fix optimized automatic run returned equal bags for all 22 TPC-H SF1
@@ -103,9 +138,10 @@ Logs: `.work/build/sec4-step1-{build,focused,core,indent}.log`; the first
 new-expectation review diff contained only87 added lines, all positive oracles.
 The standalone indexed build example is
 `.work/diagnosis/sec4-step1-index.log`. These are correctness tests, not final
-performance evaluation. Published benchmark-results.csv remains source441f907cf6;
-proper Section4 state/boundary/earlyExpand integration and optimized reevaluation
-remain active. Do not claim this first increment alone implements Section4.
+performance evaluation. Published benchmark-results.csv remains source 441f907cf6. At this first-
+correction checkpoint, Section 4 state/boundary work was still active; the
+final minimized-expression memo and GEQO validation at the top of this file
+supersede that status. Boundary-driven early Expand remains future scope.
 
 ## Current automatic integration validation (2026-10-31)
 

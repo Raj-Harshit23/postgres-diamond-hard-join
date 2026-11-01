@@ -990,6 +990,19 @@ select auto_same_rows('select a,b,c from auto_h join auto_l using(a) join auto_m
  t
 (1 row)
 
+-- Diamond's memo is independent of PostgreSQL's native join-search method.
+-- Force only selects an already eligible resident candidate after GEQO.
+set local geqo=on;
+set local geqo_threshold=3;
+set local diamond_acyclic_force=on;
+select auto_same_rows('select a,b,c from auto_a join auto_b using(a) join auto_c using(b) join auto_d using(c)',3) as automatic_geqo_chain;
+ automatic_geqo_chain 
+----------------------
+ t
+(1 row)
+
+set local diamond_acyclic_force=off;
+set local geqo_threshold=12;
 -- Genuine cycle and unsupported expression/residual dependencies stay native.
 select auto_same_rows('select x.a,x.b,y.c from auto_b x join auto_c y on x.b=y.b join auto_h z on y.c=z.c and x.a=z.a',0) as genuine_cycle_native;
  genuine_cycle_native 

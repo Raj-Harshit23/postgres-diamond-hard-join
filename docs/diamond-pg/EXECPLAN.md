@@ -1,5 +1,25 @@
 # Diamond-PG continuation plan
 
+## Final bounded Section 4 checkpoint (2026-11-01)
+
+The complete join relation now receives an independent Diamond candidate after
+standard, GEQO, or hook join search. For every root, the planner memo enumerates
+legal GYO removals and keys states by the minimized L&E parent forest rather
+than only the relation set. Complete states are compared with full physical
+cost, and only single-batch fully expanded paths enter `add_path`.
+
+Final assertion/debug compilation, focused `diamond_hashjoin` 1/1 (37.049s),
+and core 240/240 pass. The new GEQO oracle executes a four-table chain with
+three Lookup/Expand pairs and matches the native bag. The external optimized
+build also compiled, but the current TPC-H rerun on the moved hard-disk cluster
+was stopped after Q1--Q4 matched with no selection and Q5 timed out in both
+modes. Retain the earlier completed SF1/JOB CSV as benchmark evidence; do not
+combine the storage-bound partial run with it.
+
+Remaining optimizer scope is explicit: connected partial regions, boundary-
+driven early Expand, cyclic Expand3, and deferred spilling. The admitted
+bounded acyclic two-phase region is integrated and correct.
+
 ## Active cost-selection validation (2026-11-01)
 
 Post-fix TPC-H SF1 returns matching bags for 22/22 queries but automatically
@@ -43,10 +63,11 @@ No new benchmark coverage or performance change is claimed by that correction.
 
 The bounded acyclic milestone is complete: every admitted star, chain or
 branching region receives a two-phase GYO Lookup/Expand alternative and an
-independently valid serial fallback. A wider Section 4 memo with partial-region
-states and early Expand alternatives remains future search-space work; it is
-not required for correctness or completeness inside the documented admitted
-region. GEQO remains native.
+independently valid serial fallback. The root-aware minimized-expression memo
+now replaces the greedy schedule and
+also runs after GEQO. Connected partial-region states and early Expand remain
+future search-space work; they are not required for correctness or completeness
+inside the documented admitted two-phase region.
 
 ## Completed follow-up: zero-coverage diagnosis
 
@@ -98,12 +119,13 @@ new changes without reviewing/restoring its saved originals.
 - Off-by-default `diamond_acyclic` adds cost competitors rather than forcing
   selection. Ordinary native methods/indexes/parallel alternatives remain.
 
-Current automatic scope: a complete standard-search region of 3–16 plain heap
+Current automatic scope: a complete 3–16-relation region of plain heap
 relations, strict same-type simple-column EC equalities, immutable base quals,
 no live outer/special/lateral/security/locking/DML/subplan boundary, and a
-retained serial heap/hash fallback skeleton. GEQO/hook search, unsupported
-expressions/cross residuals and other input methods stay native. No Expand3,
-eager aggregation or outer-join reordering. Do not claim broader coverage.
+retained serial heap/hash fallback skeleton. Candidate generation follows
+standard, GEQO, or hook join search; unsupported expressions, cross residuals,
+and other input methods stay native. No Expand3, eager aggregation, or
+outer-join reordering is implemented.
 
 ## Validation checkpoint
 

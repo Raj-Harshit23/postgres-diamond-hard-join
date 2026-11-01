@@ -23,6 +23,7 @@
 #include "access/stratnum.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_type_d.h"
+#include "executor/nodeHash.h"
 #include "executor/nodeLookupExpand.h"
 #include "optimizer/restrictinfo.h"
 #include "access/tsmapi.h"
@@ -99,6 +100,7 @@ join_search_hook_type join_search_hook = NULL;
 
 
 static void set_base_rel_consider_startup(PlannerInfo *root);
+static void add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel);
 static void set_base_rel_sizes(PlannerInfo *root);
 static void setup_simple_grouped_rels(PlannerInfo *root);
 static void set_base_rel_pathlists(PlannerInfo *root);
@@ -3901,6 +3903,8 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 	}
 	else
 	{
+		RelOptInfo *joinrel;
+
 		/*
 		 * Consider the different orders in which we could join the rels,
 		 * using a plugin, GEQO, or the regular join search code.
@@ -3911,11 +3915,21 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
 		root->initial_rels = initial_rels;
 
 		if (join_search_hook)
-			return (*join_search_hook) (root, levels_needed, initial_rels);
+			joinrel = (*join_search_hook) (root, levels_needed, initial_rels);
 		else if (enable_geqo && levels_needed >= geqo_threshold)
-			return geqo(root, levels_needed, initial_rels);
+			joinrel = geqo(root, levels_needed, initial_rels);
 		else
-			return standard_join_search(root, levels_needed, initial_rels);
+			joinrel = standard_join_search(root, levels_needed, initial_rels);
+
+		/*
+		 * Diamond-PG: L&E is a physical alternative over the completed join
+		 * relation, independent of whether PostgreSQL enumerated that
+		 * relation with dynamic programming, GEQO, or a join-search hook. Its
+		 * own memo below uses base-relation states and never consumes a
+		 * pruned join path.
+		 */
+		add_diamond_acyclic_path(root, joinrel);
+		return joinrel;
 	}
 }
 
@@ -3949,6 +3963,24 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
  * original states of those data structures.  See geqo_eval() for an example.
  */
 /*
+ * One entry in the acyclic Lookup-state memo.  A state represents the
+ * factorized forest left after removing zero or more GYO ears.  Fixed-size
+ * arrays keep the bounded (at most 16 relations) memo compact and avoid one
+ * planner allocation for every transition considered.
+ */
+#define DIAMOND_MAX_ACYCLIC_RELS 16
+typedef struct DiamondGyoState
+{
+	struct DiamondGyoState *next;
+	Cost		score;
+	int			parents[DIAMOND_MAX_ACYCLIC_RELS];
+	int			order[DIAMOND_MAX_ACYCLIC_RELS];
+	int			order_length;
+	double		heads[DIAMOND_MAX_ACYCLIC_RELS];
+	int			payloads[DIAMOND_MAX_ACYCLIC_RELS];
+}			DiamondGyoState;
+
+/*
  * Diamond-PG: build relation hyperedges from PostgreSQL EquivalenceClasses,
  * not textual equality edges. GYO removes an ear when all attributes shared
  * with the remaining relations occur in one parent. Equalities such as
@@ -3966,18 +3998,22 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 	int			nec = list_length(root->eq_classes);
 	RelOptInfo **rels;
 	Bitmapset **attrs;
-	Bitmapset  *active;
 	Var		 ***members;
 	EquivalenceClass **classes;
+	List	  **edge_clauses;
+	DiamondGyoState **memo;
 	DiamondPath *diamond;
 	DiamondPath *template;
-	int			preferred_root;
+	uint32		fullmask;
+	uint32		mask;
+	bool		added = false;
 	ListCell   *lc;
 	int			i;
 	int			e;
+	int			preferred_root;
 	int			rti = -1;
 
-	if (!diamond_acyclic || n < 3 || n > 16 || root->parent_root ||
+	if (!diamond_acyclic || n < 3 || n > DIAMOND_MAX_ACYCLIC_RELS || root->parent_root ||
 		!bms_equal(joinrel->relids, root->all_baserels) ||
 		root->parse->commandType != CMD_SELECT || root->parse->hasModifyingCTE ||
 		root->parse->hasSubLinks || root->parse->hasRowSecurity ||
@@ -4082,104 +4118,294 @@ add_diamond_acyclic_path(PlannerInfo *root, RelOptInfo *joinrel)
 					attrs[i] = bms_add_member(attrs[i], e);
 		e++;
 	}
+
+	/*
+	 * Build every directed equality edge once.  A Lookup from parent to ear
+	 * applies all nonredundant ECs shared by those heads; later memo
+	 * transitions only refer to these immutable RestrictInfo lists.
+	 */
+	edge_clauses = palloc0_array(List *, n * n);
+	for (i = 0; i < n; i++)
+	{
+		int			j;
+
+		for (j = 0; j < n; j++)
+		{
+			int			k;
+
+			if (i == j)
+				continue;
+			for (k = 0; k < e; k++)
+			{
+				Var		   *left;
+				Var		   *right;
+				Oid			op = InvalidOid;
+				ListCell   *family;
+				Expr	   *clause;
+
+				if (!members[k] || !members[k][i] || !members[k][j])
+					continue;
+				left = members[k][i];
+				right = members[k][j];
+				if (left->vartype != right->vartype)
+					return;
+				foreach(family, classes[k]->ec_opfamilies)
+				{
+					op = get_opfamily_member(lfirst_oid(family), left->vartype,
+											 right->vartype, BTEqualStrategyNumber);
+					if (OidIsValid(op) && op_hashjoinable(op, left->vartype) &&
+						op_strict(op))
+						break;
+					op = InvalidOid;
+				}
+				if (!OidIsValid(op))
+					return;
+				clause = make_opclause(op, BOOLOID, false,
+									   (Expr *) copyObject(left),
+									   (Expr *) copyObject(right),
+									   InvalidOid, classes[k]->ec_collation);
+				edge_clauses[i * n + j] =
+					lappend(edge_clauses[i * n + j],
+							make_simple_restrictinfo(root, clause));
+			}
+		}
+	}
+
+	/*
+	 * Paper Section 4 specializes cleanly for an alpha-acyclic, strictly
+	 * two-phase plan: a minimized L&E expression is the remaining heads plus
+	 * the parent forest of its deferred payloads. Histories with the same
+	 * relation set but different forests are different states; collapsing
+	 * them would violate the paper's state-equivalence rule. Retain the
+	 * cheapest plan for each expression and surviving root. This memo is
+	 * independent of PostgreSQL's native join-path pruning and works after
+	 * both standard join search and GEQO.
+	 */
+	fullmask = (1U << n) - 1;
+	memo = palloc0_array(DiamondGyoState *, fullmask + 1);
 	template = diamond;
 	for (preferred_root = 0; preferred_root < n; preferred_root++)
 	{
-		diamond = makeNode(DiamondPath);
-		*diamond = *template;
-		diamond->parents = list_copy(template->parents);
-		diamond->clauses = list_copy(template->clauses);
-		active = bms_add_range(NULL, 0, n - 1);
-		while (bms_num_members(active) > 1)
+		DiamondGyoState *initial;
+
+		MemSet(memo, 0, sizeof(DiamondGyoState *) * (fullmask + 1));
+		initial = palloc0(sizeof(DiamondGyoState));
+		memo[fullmask] = initial;
+		for (i = 0; i < n; i++)
 		{
-			int			ear = -1;
-			int			parent = -1;
-			double		best = DBL_MAX;
+			initial->parents[i] = -1;
+			initial->heads[i] =
+				((Path *) list_nth(template->base_paths, i))->rows;
+		}
 
-			for (i = 0; i < n; i++)
+		for (mask = fullmask; mask > 0; mask--)
+		{
+			DiamondGyoState *state;
+
+			if (pg_popcount32(mask) == 1)
+				continue;
+			for (state = memo[mask]; state; state = state->next)
 			{
-				Bitmapset  *others = NULL;
-				Bitmapset  *shared;
-				int			j;
+				int			ear;
 
-				if (i == preferred_root || !bms_is_member(i, active))
-					continue;
-				for (j = 0; j < n; j++)
-					if (j != i && bms_is_member(j, active))
-						others = bms_add_members(others, attrs[j]);
-				shared = bms_intersect(attrs[i], others);
-				if (bms_is_empty(shared))
-					return;		/* no cross products in this hash-only
-								 * alternative */
-				for (j = 0; j < n; j++)
-					if (j != i && bms_is_member(j, active) && bms_is_subset(shared, attrs[j]) &&
-						rels[i]->rows * (rels[i]->reltarget->width + 1) < best)
+				for (ear = 0; ear < n; ear++)
+				{
+					Bitmapset  *others = NULL;
+					Bitmapset  *shared;
+					int			parent;
+
+					if (ear == preferred_root || (mask & (1U << ear)) == 0)
+						continue;
+					for (i = 0; i < n; i++)
+						if (i != ear && (mask & (1U << i)) != 0)
+							others = bms_add_members(others, attrs[i]);
+					shared = bms_intersect(attrs[ear], others);
+					bms_free(others);
+					if (bms_is_empty(shared))
 					{
-						ear = i;
-						parent = j;
-						best = rels[i]->rows * (rels[i]->reltarget->width + 1);
+						bms_free(shared);
+						continue;
 					}
+
+					for (parent = 0; parent < n; parent++)
+					{
+						List	   *clauses;
+						SpecialJoinInfo sjinfo;
+						double		selectivity;
+						double		stored_width;
+						size_t		allowed;
+						int			buckets;
+						int			batches;
+						int			skew;
+						Cost		score;
+						uint32		nextmask;
+						DiamondGyoState candidate;
+						DiamondGyoState *existing;
+
+						if (parent == ear || (mask & (1U << parent)) == 0 ||
+							!bms_is_subset(shared, attrs[parent]))
+							continue;
+						clauses = edge_clauses[parent * n + ear];
+						if (clauses == NIL)
+							continue;
+
+						stored_width =
+							((Path *) list_nth(template->base_paths, ear))->pathtarget->width +
+							state->payloads[ear] *
+							(sizeof(DiamondDeferredMatch) +
+							 ((Path *) list_nth(template->base_paths, ear))->pathtarget->width +
+							 32);
+						if (stored_width > INT_MAX / 2)
+							continue;
+						ExecChooseHashTableSize(state->heads[ear], (int) stored_width,
+												false, false, 0, &allowed, &buckets,
+												&batches, &skew);
+						if (batches != 1)
+							continue;
+
+						init_dummy_sjinfo(&sjinfo, rels[parent]->relids,
+										  rels[ear]->relids);
+						selectivity = clauselist_selectivity(root, clauses, 0,
+															 JOIN_INNER, &sjinfo);
+						score = state->score +
+							state->heads[ear] *
+							(cpu_tuple_cost + cpu_operator_cost * list_length(clauses)) +
+							state->heads[parent] *
+							(cpu_tuple_cost + 2 * cpu_operator_cost *
+							 list_length(clauses)) +
+							state->heads[parent] * cpu_tuple_cost *
+							(1.0 + rels[parent]->reltarget->width / 128.0) +
+							state->heads[ear] * state->payloads[ear] * cpu_tuple_cost *
+							(1.0 + rels[ear]->reltarget->width / 128.0);
+
+						nextmask = mask & ~(1U << ear);
+						candidate = *state;
+						candidate.next = NULL;
+						candidate.score = score;
+						candidate.parents[ear] = parent;
+						candidate.order[candidate.order_length++] = ear;
+						candidate.heads[parent] *=
+							Min(1.0, candidate.heads[ear] * selectivity);
+						candidate.payloads[parent] += 1 + candidate.payloads[ear];
+
+						/*
+						 * Different histories for the same final expression
+						 * can have different Expand costs. Compare their
+						 * complete physical costs before the final state is
+						 * pruned.
+						 */
+						if (pg_popcount32(nextmask) == 1)
+						{
+							DiamondPath *complete = makeNode(DiamondPath);
+							int			j;
+
+							*complete = *template;
+							complete->parents = NIL;
+							complete->clauses = NIL;
+							complete->order = NIL;
+							complete->head_rows = NIL;
+							for (j = 0; j < n; j++)
+							{
+								int			p = candidate.parents[j];
+
+								complete->parents = lappend_int(complete->parents, p);
+								complete->clauses =
+									lappend(complete->clauses,
+											p < 0 ? NIL : edge_clauses[p * n + j]);
+							}
+							for (j = 0; j < candidate.order_length; j++)
+								complete->order =
+									lappend_int(complete->order, candidate.order[j]);
+							complete->order =
+								lappend_int(complete->order, preferred_root);
+							if (!cost_diamond_path(root, complete))
+								continue;
+							candidate.score = complete->path.total_cost;
+						}
+
+						/* Parent forests encode the minimized L&E state. */
+						for (existing = memo[nextmask]; existing;
+							 existing = existing->next)
+							if (memcmp(existing->parents, candidate.parents,
+									   sizeof(candidate.parents)) == 0)
+								break;
+						if (existing)
+						{
+							DiamondGyoState *next = existing->next;
+
+							if (existing->score <= candidate.score)
+								continue;
+							*existing = candidate;
+							existing->next = next;
+						}
+						else
+						{
+							existing = palloc(sizeof(DiamondGyoState));
+							*existing = candidate;
+							existing->next = memo[nextmask];
+							memo[nextmask] = existing;
+						}
+					}
+					bms_free(shared);
+				}
 			}
-			if (ear < 0)
-				return;			/* genuine cycle: no safe two-phase plan */
+		}
+
+		{
+			DiamondGyoState *state = NULL;
+			DiamondGyoState *candidate;
+			int			j;
+
+			for (candidate = memo[1U << preferred_root]; candidate;
+				 candidate = candidate->next)
+				if (!state || candidate->score < state->score)
+					state = candidate;
+			if (!state)
+				continue;
+			i = preferred_root;
+			diamond = makeNode(DiamondPath);
+			*diamond = *template;
+			diamond->parents = NIL;
+			diamond->clauses = NIL;
+			diamond->order = NIL;
+			diamond->head_rows = NIL;
+			for (j = 0; j < n; j++)
+			{
+				int			parent = state->parents[j];
+
+				diamond->parents = lappend_int(diamond->parents, parent);
+				diamond->clauses =
+					lappend(diamond->clauses,
+							parent < 0 ? NIL : edge_clauses[parent * n + j]);
+			}
+			for (j = 0; j < state->order_length; j++)
+				diamond->order = lappend_int(diamond->order, state->order[j]);
+			diamond->order = lappend_int(diamond->order, i);
+			if (!cost_diamond_path(root, diamond))
+				continue;
+			diamond->estimated_startup_cost = diamond->path.startup_cost;
+			diamond->estimated_total_cost = diamond->path.total_cost;
+			diamond->forced = diamond_acyclic_force;
+			elog(DEBUG1, "Diamond acyclic cost %.2f versus native cost %.2f",
+				 diamond->path.total_cost, joinrel->cheapest_total_path->total_cost);
 
 			/*
-			 * Integer lists use int_value, not the pointer List
-			 * representation.
+			 * Diagnostic forcing changes selection only after semantic,
+			 * residency and GYO checks pass. Preserve the model costs above
+			 * for EXPLAIN.
 			 */
-			list_nth_cell(diamond->parents, ear)->int_value = parent;
-			diamond->order = lappend_int(diamond->order, ear);
-			active = bms_del_member(active, ear);
-			for (i = 0; i < e; i++)
-				if (members[i] && members[i][ear] && members[i][parent] &&
-					bms_is_member(i, attrs[ear]) && bms_is_member(i, attrs[parent]))
-				{
-					Var		   *left = members[i][parent];
-					Var		   *right = members[i][ear];
-					Oid			op = InvalidOid;
-					ListCell   *family;
-					Expr	   *clause;
-
-					if (left->vartype != right->vartype)
-						return;
-					foreach(family, classes[i]->ec_opfamilies)
-					{
-						op = get_opfamily_member(lfirst_oid(family), left->vartype,
-												 right->vartype, BTEqualStrategyNumber);
-						if (OidIsValid(op) && op_hashjoinable(op, left->vartype) && op_strict(op))
-							break;
-						op = InvalidOid;
-					}
-					if (!OidIsValid(op))
-						return;
-					clause = make_opclause(op, BOOLOID, false,
-										   (Expr *) copyObject(left), (Expr *) copyObject(right),
-										   InvalidOid, classes[i]->ec_collation);
-					lfirst(list_nth_cell(diamond->clauses, ear)) =
-						lappend(list_nth(diamond->clauses, ear), make_simple_restrictinfo(root, clause));
-				}
+			if (diamond->forced)
+			{
+				diamond->path.startup_cost = 0;
+				diamond->path.total_cost = 0;
+				diamond->path.disabled_nodes = 0;
+			}
+			add_path(joinrel, (Path *) diamond);
+			added = true;
 		}
-		diamond->order = lappend_int(diamond->order, bms_singleton_member(active));
-		if (!cost_diamond_path(root, diamond))
-			continue;
-		diamond->estimated_startup_cost = diamond->path.startup_cost;
-		diamond->estimated_total_cost = diamond->path.total_cost;
-		diamond->forced = diamond_acyclic_force;
-		elog(DEBUG1, "Diamond acyclic cost %.2f versus native cost %.2f",
-			 diamond->path.total_cost, joinrel->cheapest_total_path->total_cost);
-		/*
-		 * Diagnostic forcing changes selection only after semantic, residency and
-		 * GYO checks pass.  Preserve the model costs above for EXPLAIN.
-		 */
-		if (diamond->forced)
-		{
-			diamond->path.startup_cost = 0;
-			diamond->path.total_cost = 0;
-			diamond->path.disabled_nodes = 0;
-		}
-		add_path(joinrel, (Path *) diamond);
 	}
-	set_cheapest(joinrel);
+	if (added)
+		set_cheapest(joinrel);
 }
 
 RelOptInfo *
@@ -4289,7 +4515,6 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 	rel = (RelOptInfo *) linitial(root->join_rel_level[levels_needed]);
 
 	root->join_rel_level = NULL;
-	add_diamond_acyclic_path(root, rel);
 
 	return rel;
 }

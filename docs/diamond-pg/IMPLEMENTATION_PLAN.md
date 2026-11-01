@@ -6,11 +6,10 @@ acyclic Phase 4, cost selection Phase 5 and relevant Phase 8 evaluation.
 Architecture and continuation details are in ARCHITECTURE.md and EXECPLAN.md.
 
 The bounded acyclic milestone is complete. Legal scan/fallback construction is
-decoupled from pruned native survivors, and admitted stars, chains and branching
-queries receive costed two-phase GYO alternatives. General partial-region
-states and early Expand alternatives would broaden the optimizer search space;
-they remain future work rather than a missing correctness step. GEQO remains
-native.
+decoupled from pruned native survivors. A root-aware memo retains distinct
+minimized L&E parent forests, enumerates legal GYO schedules, and adds complete
+costed alternatives after standard, GEQO, or hook join search. General connected
+partial-region states and boundary-driven early Expand remain future scope.
 
 First correction increment validated: independent canonical serial fallback,
 independently constructed heap paths and audited unparameterized native indexed
@@ -28,16 +27,17 @@ partial-region/early-Expand search is not claimed by this bounded milestone.
 |1 instrumentation | Complete,14ac927a8b | Native counters, serial/parallel regression coverage |
 |2 immediate Lookup/Expand | Complete,c169183521 | Prior focused/core passes; historical sanitizer startup blocker |
 |3 independent/nested ownership | Bounded implementation complete;0aa87a8624 plus this retained-build checkpoint | Owned probes, private sidecars, epochs, actual allocation/batch guards; nested/rewind/resource tests pass |
-|4 acyclic planning | Conservative native checkpoint | EC/GYO, each-root candidates, stars/chains/branching and redundant-EC tests pass; eligibility remains restricted |
+|4 acyclic planning | Bounded two-phase integration complete | Root-aware minimized-expression memo; standard/GEQO/hook placement; stars/chains/branching/redundant-EC tests pass |
 |5 costing/selection | Heuristic native cost competition, safe diagnostic force and pre-output runtime fallback implemented | Q3 suggests conservative cost; Q8/Q9/Q10 forced runs validate rejection; optimized confirmation remains |
 |6 Expand3 | Outside this milestone | No cyclic optimizer implemented |
 |7 robustness extension | Outside this milestone | Initial resident-storage safety/cost is implemented; general spill/risk calibration remains future work |
 |8 relevant evaluation | Benchmark attempts and feasible memory diagnostics complete | TPC-H22/22 and JOB113/113 bags agree, no Diamond selections; scaled paper219.6x/907.6x, full N50000 automatic 23.877ms/native 120s timeout |
 
-Current-source assertion/debug/header-dependent build: focused 1/1 and full
-core 240/240 pass. Tests exercise actual selected plans rather than merely
-manual fixtures. Automatic scope is complete 3–16 plain-heap standard-search
-regions with strict simple-column EC equalities and immutable base filters;
+Final current-source assertion/debug/header-dependent build: focused 1/1 and
+full core 240/240 pass, including a forced GEQO four-relation chain with three
+Lookup/Expand pairs and a native multiset oracle. Tests exercise actual
+selected plans rather than merely manual fixtures. Automatic scope is complete
+for eligible 3–16 plain-heap regions reached through standard or GEQO search with strict simple-column EC equalities and immutable base filters;
 no live outer/lateral/security/locking/DML/subplan boundary. Native methods,
 indexes and parallel alternatives remain. Runtime rejection can select native
 only before any output; after output there is no restart. No general deferred
@@ -255,7 +255,8 @@ paper's absolute-number reproduction on different hardware/configuration.
 3. Better head-survival, copy/CPU and concurrent-live-memory calibration; native
    statistics may badly misestimate correlated/skewed results. Current costs
    are heuristic and work_mem is not a whole-query budget.
-4. Exhaustive/stronger tree/scheduling search beyond the bounded each-root GYO
-   heuristic, without comparing deferred heads to fully expanded relations.
+4. Connected partial-region and boundary-driven early-Expand search beyond
+   the bounded complete two-phase memo, without comparing deferred heads to
+   fully expanded relations.
 5. Expand3 match counts/secondary indexes and duplicate semantics, outside this
    acyclic milestone.

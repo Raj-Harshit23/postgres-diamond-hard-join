@@ -1,5 +1,27 @@
 # Diamond-PG changelog
 
+## 2026-11-01 - Integrate bounded Section 4 acyclic state search
+
+Changed `allpaths.c` so Diamond candidate generation runs after standard, GEQO,
+or hook join search. Replaced the greedy each-root schedule with a bounded,
+root-aware memo keyed by the minimized L&E parent forest. It enumerates legal
+GYO transitions, keeps distinct expressions for the same relation set, checks
+single-batch residency at every build, and compares complete schedules using
+the full Lookup/Expand cost before adding a fully expanded path. Native paths
+and the independent serial fallback remain unchanged.
+
+Extended the existing `diamond_hashjoin` regression with a forced GEQO
+four-table chain; three Lookup/Expand pairs execute and the bag matches native.
+Final assertion/debug compilation passed, focused 1/1 passed in 37.049s, and all
+240 core tests passed. `pgindent` and `git diff --check` pass. A moved-disk
+TPC-H attempt verified Q1--Q4 bags, then both modes timed out on Q5; the partial
+run is recorded only as an environment limitation, while the completed
+versioned benchmark CSV remains the valid baseline.
+
+Files: `src/backend/optimizer/path/allpaths.c`, the existing Diamond regression
+SQL/expected files, and the five existing Diamond project documents. No new
+source, script, or documentation file was added.
+
 ## 2026-11-01 - Safe forced cost diagnosis
 
 Added off-by-default `diamond_acyclic_force` after all normal eligibility and
