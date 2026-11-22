@@ -475,6 +475,30 @@ compete as ordinary results. New costs belong in `costsize.c`/`cost.h`.
 This is an architectural decision to review in its own phase, not a promise
 that adding two node tags alone implements the paper optimizer.
 
+## Expand cost model and blow-up-robust selection
+
+`cost_diamond_path` (`costsize.c`) sums scan, hash build, Lookup probe, owned
+probe copy and Expand enumeration costs for a fully expanded candidate. The
+Expand enumeration is capped by `effective_rows`, chosen at run time by the
+`diamond_cost_model` GUC (`DiamondCostModel` in `nodeLookupExpand.h`):
+
+- `relational` (default): cap at `path->path.rows`, the relational join
+  cardinality. Faithful, but on a diamond that estimate is a
+  selectivity-inflated phantom both plans inherit, so Diamond barely wins.
+- `underestimate`: cap at the surviving-head count (paper Section 4, footnote
+  9 -- Expands run last, so only survivors are enumerated). Exposes the benefit
+  but under-prices ordinary joins and favors the most-underestimated schedule.
+- `blowup_robust`: use the underestimate only when `diamond_region_blows_up`
+  reports a blow-up, else price relationally. The helper reads PostgreSQL's own
+  `join_rel_list` sub-join sizes and flags the region when some proper sub-join
+  (2..n-1 base relations) is estimated above `diamond_blowup_threshold` times
+  its largest participating base relation. It deliberately never consults the
+  full n-way (phantom) estimate, only reliable local ones.
+
+Only selection changes; correctness and the pre-output native fallback are
+identical in every model. Under GEQO `join_rel_list` is partial, so a missing
+sub-join conservatively reads as "no blow-up" (native stays chosen).
+
 ## Phase 1: optional native HashJoin counters
 
 `SET diamond_hashjoin_stats = on` enables counters for instrumented execution

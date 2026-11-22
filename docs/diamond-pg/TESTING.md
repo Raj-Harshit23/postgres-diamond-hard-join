@@ -144,6 +144,53 @@ false negative; the other three rejections are correct. Focused 1/1 and full
 core 240/240 pass with the force/EXPLAIN regression. Raw evidence is under
 `.work/bench-force-debug*` and `.work/build-cloud/force-{build,focused,core}.log`.
 
+## Selectable Expand cost models (2026-11-23)
+
+Reproduces why the automatic planner barely preferred Diamond on the paper
+microbenchmark and how `diamond_cost_model` fixes it. Build/install the
+debug/assert server as above, then start a private cluster (TCP loopback avoids
+the 107-byte socket-path limit) and load the paper fixture plus a non-diamond
+PK-FK control:
+
+```sh
+inst=scripts/diamond-pg/.work/install
+data=scripts/diamond-pg/.work/data-verify
+"$inst/bin/initdb" -D "$data" --auth=trust --no-instructions
+"$inst/bin/pg_ctl" -D "$data" -l "$data/server.log" \
+  -o "-p 55440 -c listen_addresses=127.0.0.1 -c unix_socket_directories='' \
+      -c shared_buffers=256MB -c work_mem=64MB -c hash_mem_multiplier=2 -c jit=off" -w start
+psql="$inst/bin/psql -X -h 127.0.0.1 -p 55440"
+# diamond_micro: the Section 5.1 fixture (same DO block as _run-benchmark.sh paper).
+# nodiamond: fact(100k) JOIN dim2(1k) ON k1 JOIN dim3(100) ON k2 -- PK-FK, no blow-up.
+```
+
+Query and switch (restart the postmaster after each rebuild; a running backend
+keeps the old binary image):
+
+```sh
+$psql -d diamond_micro -c "SET diamond_acyclic=on; SET diamond_cost_model='blowup_robust';" \
+  -c "EXPLAIN SELECT x.a,x.b,y.c,z.d FROM x5000 x JOIN y5000 y ON x.b=y.b JOIN z5000 z ON y.c=z.c;"
+```
+
+Observed estimated totals (N=5000; native estimated total 781,125,338):
+
+| diamond_cost_model | microbenchmark chosen plan / total | non-diamond PK-FK (native 2870.50) |
+| --- | --- | --- |
+| relational (default) | Diamond 702,954,032 (~10% gap) | native Hash Join |
+| underestimate | Diamond 1,118.98 | Diamond 2,772.31 (mis-selected, ~1.5x slower) |
+| blowup_robust | Diamond 1,118.98 | native Hash Join |
+
+Under `blowup_robust` the microbenchmark executed in 6.164ms versus 3112.957ms
+native with identical bags (`EXCEPT ALL` diff 0, one result row); the PK-FK
+control keeps the native plan (21.4ms). The signal reads PostgreSQL's own
+`join_rel_list` sub-join estimates (never the phantom full-join estimate):
+X&#8904;Y is estimated at 24,985,001 rows over ~10k inputs (ratio ~2500,
+blow-up) while fact&#8904;dim2 is 100,000 over a 100,000 input (ratio 1, not a
+blow-up). The default `relational` leaves committed behavior unchanged, so the
+focused `diamond_hashjoin` 1/1 and full core 240/240 pass as before; pgindent
+and `git diff --check` are clean. Raw clusters live in the ignored
+`.work/data-verify`; stop the server with `pg_ctl -D "$data" -m fast -w stop`.
+
 ## Live reproducible TPC-H run
 
 The local SF1 database is `scripts/diamond-pg/.work/bench-data`; generated

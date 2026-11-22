@@ -1,5 +1,59 @@
 # Diamond-PG changelog
 
+## 2026-11-23 - Selectable Diamond Expand cost models and blow-up-robust selection
+
+Diagnosed and fixed why the automatic planner barely preferred Diamond on the
+paper microbenchmark even when it won. `cost_diamond_path` charged the Expand
+phase at the full relational join cardinality `path->path.rows`, which on a
+diamond query is a selectivity-inflated phantom (N=5000: estimated
+62,462,504,152 rows for a one-row result, because the estimator misses the
+anti-correlation between a selective Lookup and the next join). Native and
+Diamond both inherit that phantom, so the modeled gap was ~10% while the real
+speedup is ~670x. Birler et al. Section 4 footnote 9 prescribes *underestimating*
+Expand, since Expands run as late as possible and only surviving heads need
+enumerating.
+
+Added run-time-selectable cost models instead of committing to one formula, so
+each strategy stays in the tree and can be compared in one session without a
+rebuild. New off-by-sample developer GUCs; the default reproduces the committed
+behavior exactly:
+- `diamond_cost_model` enum = `relational` (default) | `underestimate` |
+  `blowup_robust`.
+- `diamond_blowup_threshold` real, default 10.0, range [1.0, 1e9].
+
+`relational` is the prior behavior (Expand costed at the relational cardinality).
+`underestimate` bounds Expand enumeration by the surviving-head count; it exposes
+the diamond benefit but, applied unconditionally, under-prices ordinary joins (a
+non-diamond PK-FK chain was mis-selected and ran ~1.5x slower) and biases toward
+the most-underestimated GYO schedule -- the "fleeing from knowledge to ignorance"
+trap the paper warns about. `blowup_robust` resolves this: it underestimates only
+when a *local* sub-join (2..n-1 relations, read from `join_rel_list`, never the
+phantom full-join estimate) is estimated to fan out past
+`diamond_blowup_threshold` times its largest input; otherwise it costs
+relationally, so ordinary joins stay native. This is the paper's stated goal of
+balancing cost optimization with robustness. Only plan SELECTION is affected;
+Diamond correctness and the pre-output native fallback are identical in every
+model.
+
+Files: `src/backend/optimizer/path/costsize.c` (new `diamond_region_blows_up`
+helper and per-model enumeration cap in `cost_diamond_path`),
+`src/backend/executor/nodeLookupExpand.c` / `.h` (DiamondCostModel enum, GUC
+variables), `src/backend/utils/misc/guc_parameters.dat` and `guc_tables.c` (GUC
+plus options array), `doc/src/sgml/config.sgml` (documentation). No new source
+or Markdown file was added.
+
+Validation (debug/assert build): clean compile with no new warnings, pgindent
+and `git diff --check` clean, focused `diamond_hashjoin` 1/1, full core 240/240.
+On the N=5000 microbenchmark (native estimated total 781,125,338):
+`relational` keeps Diamond at 702,954,032 (~10% gap); `underestimate` and
+`blowup_robust` both drop it to 1,118.98. `blowup_robust` executed in 6.164ms
+versus 3112.957ms native with identical bags (EXCEPT ALL diff 0, one result
+row). On a non-diamond PK-FK chain (native 2870.50): `relational` and
+`blowup_robust` keep the native Hash Join; `underestimate` mis-selects Diamond
+at 2772.31. Reproduction commands are in TESTING.md. No benchmark suite was
+rerun; the schedule-quality (small-root) bias under `underestimate` is left as a
+later refinement. Committed on diamond-pg-cloud.
+
 ## 2026-11-02 - Midterm report and presentation aids
 
 Added a two-page, two-column LaTeX midterm report covering the diamond problem,

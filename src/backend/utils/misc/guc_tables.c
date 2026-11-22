@@ -307,6 +307,17 @@ static const struct config_enum_entry backslash_quote_options[] = {
 };
 
 /*
+ * Diamond-PG: selectable Expand cost models for the diamond_cost_model GUC.
+ * See src/include/executor/nodeLookupExpand.h for what each strategy does.
+ */
+static const struct config_enum_entry diamond_cost_model_options[] = {
+	{"relational", DIAMOND_COST_RELATIONAL, false},
+	{"underestimate", DIAMOND_COST_UNDERESTIMATE, false},
+	{"blowup_robust", DIAMOND_COST_BLOWUP_ROBUST, false},
+	{NULL, 0, false}
+};
+
+/*
  * Although only "on", "off", and "auto" are documented, we accept
  * all the likely variants of "on" and "off".
  */

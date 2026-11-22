@@ -6891,7 +6891,7 @@ compute_gather_rows(Path *path)
 
 /* Estimate the actual preorder Expand work, including nested sidecar copies. */
 static Cost
-diamond_enumeration_cost(DiamondPath *path, int parent, double *rows,
+diamond_enumeration_cost(DiamondPath * path, int parent, double *rows,
 						 double *fanout, int *remaining, double final_rows)
 {
 	Cost		cost = 0;
@@ -6933,6 +6933,50 @@ diamond_enumeration_cost(DiamondPath *path, int parent, double *rows,
 }
 
 /*
+ * Diamond-PG: decide whether a Diamond region is "blow-up-prone", the signal
+ * that drives diamond_cost_model = blowup_robust. The diamond problem is a
+ * growing intermediate -- a sub-join far larger than its own inputs -- that a
+ * later join filters away. We read PostgreSQL's own already-computed sub-join
+ * sizes from join_rel_list and compare each PROPER sub-join (2 .. n-1 base
+ * relations) to the largest base relation it contains. Proper sub-joins are
+ * reliable LOCAL cardinalities; we deliberately never use the full n-way
+ * estimate, which is exactly the selectivity-inflated phantom the diamond
+ * rewrite exists to survive. If any such sub-join is estimated to fan out past
+ * diamond_blowup_threshold times its inputs, the region can blow up. Under
+ * GEQO join_rel_list is only partially populated; a missing sub-join simply
+ * makes us answer "no blow-up", which keeps the ordinary native plan -- a safe,
+ * conservative default that never risks correctness.
+ */
+static bool
+diamond_region_blows_up(PlannerInfo *root, Relids region)
+{
+	int			region_size = bms_num_members(region);
+	ListCell   *lc;
+
+	foreach(lc, root->join_rel_list)
+	{
+		RelOptInfo *jr = lfirst_node(RelOptInfo, lc);
+		int			members = bms_num_members(jr->relids);
+		double		max_base = 1.0;
+		int			rti = -1;
+
+		if (members < 2 || members >= region_size ||
+			!bms_is_subset(jr->relids, region))
+			continue;
+		while ((rti = bms_next_member(jr->relids, rti)) >= 0)
+		{
+			RelOptInfo *base = root->simple_rel_array[rti];
+
+			if (base != NULL && base->rows > max_base)
+				max_base = base->rows;
+		}
+		if (jr->rows > diamond_blowup_threshold * max_base)
+			return true;
+	}
+	return false;
+}
+
+/*
  * Diamond-PG: cost the fully expanded two-phase alternative in native CPU
  * units. Head cardinalities shrink as each child is looked up; enumeration
  * still pays for the complete result. Include hash/key work, owned probe
@@ -6943,7 +6987,7 @@ diamond_enumeration_cost(DiamondPath *path, int parent, double *rows,
  * that deferred payloads can enter PostgreSQL batch files.
  */
 bool
-cost_diamond_path(PlannerInfo *root, DiamondPath *path)
+cost_diamond_path(PlannerInfo *root, DiamondPath * path)
 {
 	int			n = list_length(path->base_paths);
 	double	   *heads = palloc_array(double, n);
@@ -6955,6 +6999,7 @@ cost_diamond_path(PlannerInfo *root, DiamondPath *path)
 	Cost		copy = 0;
 	Cost		enumerate;
 	double		enumeration_rows;
+	double		effective_rows;
 	int			remaining = 0;
 	double		live = 0;
 	ListCell   *lc;
@@ -7013,9 +7058,42 @@ cost_diamond_path(PlannerInfo *root, DiamondPath *path)
 	foreach(lc, path->parents)
 		if (lfirst_int(lc) == root_index)
 		remaining++;
+
+	/*
+	 * Diamond-PG: enumeration always STARTS from the surviving-head count
+	 * (the heads that passed every Lookup). What differs per cost model is
+	 * the CAP on how far Expand is allowed to re-grow that head via fanout:
+	 *
+	 * RELATIONAL    - cap at the full relational cardinality path->path.rows
+	 * (the committed behavior; Expand pays for the complete, possibly
+	 * phantom-inflated, result). UNDERESTIMATE - cap at the surviving heads
+	 * themselves (footnote 9): once Lookups have filtered, only the survivors
+	 * are expanded. BLOWUP_ROBUST - underestimate only when a local sub-join
+	 * is estimated to blow up; otherwise fall back to the relational cap so
+	 * an ordinary non-diamond join is never under-priced.
+	 *
+	 * effective_rows is also the honest count of output tuples this model
+	 * claims Expand produces, so the per-tuple projection term below uses it
+	 * too.
+	 */
 	enumeration_rows = Min(path->path.rows, heads[root_index]);
+	switch (diamond_cost_model)
+	{
+		case DIAMOND_COST_UNDERESTIMATE:
+			effective_rows = enumeration_rows;
+			break;
+		case DIAMOND_COST_BLOWUP_ROBUST:
+			effective_rows =
+				diamond_region_blows_up(root, path->path.parent->relids) ?
+				enumeration_rows : path->path.rows;
+			break;
+		case DIAMOND_COST_RELATIONAL:
+		default:
+			effective_rows = path->path.rows;
+			break;
+	}
 	enumerate = diamond_enumeration_cost(path, root_index, &enumeration_rows,
-										 fanout, &remaining, path->path.rows);
+										 fanout, &remaining, effective_rows);
 	path->head_rows = NIL;
 	for (i = 0; i < n; i++)
 		path->head_rows = lappend(path->head_rows, makeFloat(psprintf("%.17g", heads[i])));
@@ -7025,7 +7103,7 @@ cost_diamond_path(PlannerInfo *root, DiamondPath *path)
 	path->path.total_cost = scans + build + probe + copy +
 		enumerate +
 		path->path.pathtarget->cost.startup +
-		path->path.rows * path->path.pathtarget->cost.per_tuple;
+		effective_rows * path->path.pathtarget->cost.per_tuple;
 	path->path.startup_cost = Min(path->path.startup_cost, path->path.total_cost);
 	return true;
 }

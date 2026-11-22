@@ -825,6 +825,23 @@
   boot_val => 'false',
 },
 
+{ name => 'diamond_blowup_threshold', type => 'real', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Intermediate-to-input fanout ratio above which diamond_cost_model=blowup_robust treats a Diamond region as blow-up-prone.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'diamond_blowup_threshold',
+  boot_val => '10.0',
+  min => '1.0',
+  max => '1e9',
+},
+
+{ name => 'diamond_cost_model', type => 'enum', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
+  short_desc => 'Selects the acyclic Diamond join Expand cost model.',
+  flags => 'GUC_NOT_IN_SAMPLE',
+  variable => 'diamond_cost_model',
+  boot_val => 'DIAMOND_COST_RELATIONAL',
+  options => 'diamond_cost_model_options',
+},
+
 { name => 'diamond_hashjoin_stats', type => 'bool', context => 'PGC_USERSET', group => 'DEVELOPER_OPTIONS',
   short_desc => 'Collects native hash join probe and match counts for EXPLAIN ANALYZE.',
   flags => 'GUC_NOT_IN_SAMPLE',

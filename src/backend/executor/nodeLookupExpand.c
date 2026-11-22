@@ -20,6 +20,10 @@ bool		diamond_independent_lookup_expand = false;
 bool		diamond_acyclic = false;
 bool		diamond_acyclic_force = false;
 
+/* Diamond-PG: run-time-selectable Expand cost model; see nodeLookupExpand.h. */
+int			diamond_cost_model = DIAMOND_COST_RELATIONAL;
+double		diamond_blowup_threshold = 10.0;
+
 /* A single origin lets fallback distinguish our guard from arbitrary SQL errors. */
 void
 ExecDiamondResourceError(const char *message)
@@ -45,7 +49,7 @@ deferred_matches(PlanState *state)
 
 /* Validate the query-owned owner before dereferencing any borrowed storage. */
 static void
-check_match(DiamondDeferredMatch *match)
+check_match(DiamondDeferredMatch * match)
 {
 	if (match->generation != (match->retained ?
 							  match->owner->storage_generation : match->owner->generation))
@@ -89,7 +93,7 @@ typedef struct DiamondBuildEntry
 {
 	HashJoinTuple tuple;		/* dynahash key */
 	List	   *matches;
-} DiamondBuildEntry;
+}			DiamondBuildEntry;
 
 /*
  * Pin every owner that can contribute a deferred head, before the first pull.
@@ -552,7 +556,7 @@ ExecDiamondJoin(PlanState *pstate)
 
 /* Both initialized branches have identical target descriptors and parameters. */
 DiamondJoinState *
-ExecInitDiamondJoin(DiamondJoin *node, EState *estate, int eflags)
+ExecInitDiamondJoin(DiamondJoin * node, EState *estate, int eflags)
 {
 	DiamondJoinState *state = makeNode(DiamondJoinState);
 
@@ -567,7 +571,7 @@ ExecInitDiamondJoin(DiamondJoin *node, EState *estate, int eflags)
 
 /* An error before the first result may already have ended the optimized arm. */
 void
-ExecEndDiamondJoin(DiamondJoinState *state)
+ExecEndDiamondJoin(DiamondJoinState * state)
 {
 	ExecEndNode(outerPlanState(state));
 	ExecEndNode(innerPlanState(state));
@@ -575,7 +579,7 @@ ExecEndDiamondJoin(DiamondJoinState *state)
 
 /* Reprepare per rescan, rebuilding a previously rejected optimized arm. */
 void
-ExecReScanDiamondJoin(DiamondJoinState *state)
+ExecReScanDiamondJoin(DiamondJoinState * state)
 {
 	state->prepared = false;
 	state->fallback = false;

@@ -1,5 +1,26 @@
 # Diamond-PG continuation plan
 
+## Selectable Expand cost models (2026-11-23)
+
+Root cause found for the microbenchmark's thin cost margin: `cost_diamond_path`
+charged Expand at the relational cardinality `path->path.rows`, a
+selectivity-inflated phantom on diamond queries (N=5000: 6.2e10 estimated for a
+one-row result) that native and Diamond both inherit. Birler et al. Section 4
+footnote 9 says to underestimate Expand. Rather than hard-code one formula, a
+run-time GUC `diamond_cost_model` (relational default | underestimate |
+blowup_robust) plus `diamond_blowup_threshold` (default 10.0) now select the
+Expand cap; each strategy stays in the tree for A/B comparison. `blowup_robust`
+is the paper's cost-vs-robustness balance: underestimate only when a local
+`join_rel_list` sub-join is estimated to fan out past the threshold (never the
+phantom full-join estimate), else relational. Result: microbenchmark Diamond
+estimate 7.8e8 -> ~1119 and 468-670x real speedup, while a non-diamond PK-FK
+control stays native. `underestimate` alone mis-selects that control and biases
+toward the smallest GYO root (the paper's "fleeing to ignorance" trap), so it is
+kept only as a diagnostic model. Focused 1/1 and core 240/240 pass at the
+default; details and reproduction are in TESTING.md and CHANGELOG.md. Next:
+schedule-quality under underestimate, and optimized/suite confirmation that
+`blowup_robust` does not regress real workloads.
+
 ## Final bounded Section 4 checkpoint (2026-11-01)
 
 The complete join relation now receives an independent Diamond candidate after

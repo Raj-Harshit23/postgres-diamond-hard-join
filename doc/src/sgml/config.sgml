@@ -13069,6 +13069,52 @@ dynamic_library_path = '/usr/local/lib/postgresql:$libdir'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-diamond-cost-model" xreflabel="diamond_cost_model">
+      <term><varname>diamond_cost_model</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>diamond_cost_model</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: selects how the <literal>diamond_acyclic</literal> cost
+        estimate prices the <literal>Diamond Expand</literal> phase. Only plan
+        selection is affected; Diamond correctness and the pre-output native
+        fallback are identical in every setting. The default
+        <literal>relational</literal> charges Expand at the full relational
+        join cardinality, which reproduces the committed behavior but, when that
+        estimate is a selectivity-inflated over-estimate, hides the
+        decomposition's benefit. <literal>underestimate</literal> bounds Expand
+        by the surviving-head count, as prescribed by Birler et al. (PVLDB 2024,
+        Section 4): it exposes the benefit on diamond queries but can also
+        under-price ordinary joins. <literal>blowup_robust</literal> applies the
+        underestimate only when some intermediate sub-join of the region is
+        estimated to fan out past <literal>diamond_blowup_threshold</literal>
+        times its inputs, and otherwise prices relationally, so ordinary
+        non-diamond joins remain native.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-diamond-blowup-threshold" xreflabel="diamond_blowup_threshold">
+      <term><varname>diamond_blowup_threshold</varname> (<type>floating point</type>)
+      <indexterm>
+       <primary><varname>diamond_blowup_threshold</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Diamond-PG: the intermediate-to-input fanout ratio above which
+        <literal>diamond_cost_model = blowup_robust</literal> treats a Diamond
+        region as blow-up-prone. A region qualifies when some sub-join of two or
+        more (but not all) of its base relations is estimated to produce more
+        than this multiple of its largest participating base relation. The
+        default is <literal>10.0</literal> and the minimum is
+        <literal>1.0</literal>. It has no effect under the other cost models.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-diamond-independent-lookup-expand" xreflabel="diamond_independent_lookup_expand">
       <term><varname>diamond_independent_lookup_expand</varname> (<type>boolean</type>)
       <indexterm>
