@@ -110,6 +110,15 @@ used no runtime fallback, and wrote no temp blocks. Raw JSON and the live log
 are in the Data-disk `.work/bench-section4-paper-final/` paths; compact results
 are versioned in `benchmark-results.csv`.
 
+For the 2026-11-02 report, one additional live N=5000 `EXPLAIN (ANALYZE,
+BUFFERS)` pair used the same existing fixture. Native emitted 24,985,001 rows
+from its lower Hash Join and finished in 2146.301ms. Forced Diamond scanned
+9,996 Y rows, emitted 4,999 heads from the Z lookup and one from the X lookup,
+then one final row with `Diamond Runtime Fallback: false` in 3.101ms. This is a
+single explanatory run, not a replacement for the three-run medians above.
+Raw output is ignored at `.work/report-explain-analyze.log`; the private server
+was stopped after capture.
+
 The final-source TPC-H SF1 rerun completed all 22 queries in 263.23s with
 matching bags, no errors/timeouts, and zero Diamond selections. Sum of medians
 was 18.083764s native and 19.375675s automatic; Q18 runtime variance accounts

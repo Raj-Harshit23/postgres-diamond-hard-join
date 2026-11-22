@@ -46,3 +46,7 @@ lib*.pc
 
 # Diamond-PG out-of-tree build, database and validation output.
 /scripts/diamond-pg/.work/
+
+# Diamond-PG report: keep only editable LaTeX sources.
+/docs/diamond-pg/report/*
+!/docs/diamond-pg/report/*.tex

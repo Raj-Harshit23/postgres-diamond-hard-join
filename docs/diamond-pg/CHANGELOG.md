@@ -1,5 +1,67 @@
 # Diamond-PG changelog
 
+## 2026-11-02 - Midterm report and presentation aids
+
+Added a two-page, two-column LaTeX midterm report covering the diamond problem,
+the paper's Lookup--Expand rewrite, the PostgreSQL executor mechanism, and the
+validated paper microbenchmark. The report uses cropped Figure 1 and Figure 3
+from the supplied paper, reports the 200.99x and 669.27x completed-pair speedups,
+and keeps automatic planner scheduling, broad JOB/TPC-H evaluation, parallel
+state, spilling, outer joins, and Expand3 as future work. Reworked the local
+Markdown notes for two speakers and a ten-minute report-plus-terminal demo,
+including a four-person work distribution and a native-versus-forced command
+sequence with separate pre-demo build/fixture preparation. Split the live demo
+into start, native EXPLAIN, forced Diamond EXPLAIN, and stop blocks; documented
+the EXPLAIN options, custom Diamond cost fields, and the unexecuted native
+fallback branch.
+Generated PDF, extracted paper figures, Markdown presentation aids, and LaTeX
+build output are intentionally ignored; `report.tex` remains the tracked source.
+
+Revised the report after layout review: removed the forced page break and
+replaced the sparse layout with continuous, numbered, two-column sections.
+Expanded the operator rewrite, iterator/ownership contract, both binary join
+orders, exact intermediate-row calculation, SQL demo, and result limitations.
+Figures now use vector crops directly from the supplied repository-root paper;
+standalone figure images are unnecessary. Build in `docs/diamond-pg/report/`
+with `pdflatex -interaction=nonstopmode -halt-on-error report.tex` twice.
+Verified exactly two pages and inspected both rendered pages: full columns,
+legible figures, no clipped labels or overlapping text. No benchmarks rerun.
+Added the four team members and their roll numbers beneath the report title;
+recompiled and verified the two-page layout.
+Simplified the report's PostgreSQL execution section to the essential pull,
+Lookup/Expand cursor, duplicate-preservation, and safe-fallback explanation;
+removed internal ownership and memory-accounting terminology from the report.
+Reframed that section as a plain PostgreSQL execution walkthrough: native
+Hash Join build/probe/bucket scanning followed by the independent Lookup and
+Expand node behavior. Removed the separate correctness paragraph and the
+parallel/spill/outer-join/Expand3 future-work sentence.
+Ran one requested native and forced-Diamond `EXPLAIN (ANALYZE, BUFFERS)`
+on the existing N=5000 fixture. Added a compact plan excerpt to Section 3 and
+clarified that each Expand call returns one match and retains its bucket cursor
+for the next call. The live plan measured 2146.301ms native and 3.101ms forced;
+the native lower join emitted 24,985,001 rows, while Diamond's two Lookups
+reduced 9,996 scanned Y rows to 4,999 heads and then one before expansion.
+Corrected the microbenchmark explanation to match this observed Z-then-X lookup
+order. Removed the redundant live-demo settings paragraph because the plan
+excerpt and results section already provide that information. Replaced the
+results section's internal terms (checkpoint, testing ledger, completed pairs,
+and result bags) with a direct correctness statement and a plain description
+of the three-run median. Defined the paper's "head" term once as the current
+partial result tuple plus a saved position for deferred matches, then replaced
+later repetitions with plain tuple/candidate wording. Corrected the physical
+plan explanation: Z is hashed while Y is scanned; the surviving Y candidates
+and their saved Z positions are then hashed by b so scanned X can probe them.
+After review, replaced the abbreviated plan tree with an explicitly labelled
+short summary because omitting child scans made the two Lookup hash inputs look
+inconsistent. The report leaves the full PostgreSQL `EXPLAIN ANALYZE` output to
+the live demo. Removed process-oriented wording ("requested" and "live plan
+evidence") from the report. A final factual audit clarified that pull execution
+drains fanout across repeated calls, defined GYO acyclicity directly, described
+saved positions as private state, replaced "serial" with "single-process",
+distinguished a single plan run from reported medians, and limited future-work
+wording to automatic cost selection and broader evaluation. Recompiled twice
+and verified that the report remains exactly two pages.
+
 ## 2026-11-01 - Consolidated midterm code-reading map
 
 Added the requested `midterm-fileschanged.md`: an ordered 45-file table from
