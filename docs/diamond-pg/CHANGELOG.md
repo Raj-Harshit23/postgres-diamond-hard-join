@@ -1,5 +1,38 @@
 # Diamond-PG changelog
 
+## 2026-11-23 - STATS-CEB: first real-benchmark Diamond selection and speedup
+
+Loaded STATS-CEB (Han et al., PVLDB 2022) -- a real cardinality-estimation
+benchmark (~50MB Stack Exchange data, 146 COUNT(*) multi-join queries, joined on
+non-PK columns so native hash-joins) -- into the debug build with its standard
+indexes. Under `diamond_cost_model=blowup_robust` the planner AUTOMATICALLY
+selects Diamond on 4 queries (JOB and TPC-H selected zero), all returning counts
+identical to native and the published true cardinalities. Warm best-of-three:
+Q8 is 2.19x faster (232.6 -> 106.2ms; native uses a 9,405-loop index nested loop
+on comments, Diamond builds the hash once and filters heads to ~5,741 before
+Expand); Q7 is a tie; Q121/Q37 are 1.15x/2.70x slower. Setting
+`diamond_blowup_threshold=50` (run-time GUC) drops Q37 to native while keeping
+the Q8 win. This is the first automatic Diamond selection and real speedup on a
+published benchmark, beyond the synthetic microbenchmark; cost calibration on
+borderline count(*) queries remains future work. Evidence in TESTING.md; STATS
+data/queries live in the ignored `.work/stats-ceb`. No source change. Uncommitted.
+
+## 2026-11-23 - TPC-H SF1 and JOB cost-model survey
+
+EXPLAIN-only survey (no execution) of the new cost models against the preserved
+Data-disk cluster (tpch_sf1, job_cloud) at work_mem=64MB. Diamond is selected on
+0 of 22 TPC-H and 0 of 113 JOB queries under every cost model (relational,
+underestimate, blowup_robust): 4 TPC-H and 105 JOB queries generate a candidate,
+but native's indexed nested-loop / parallel plans are 1.4x-572x cheaper than the
+serial seq-scan+hash Diamond arm. Consistent with Birler et al.: on JOB,
+Lookup & Expand is reported neutral ("do not result in significant improvements
+or regressions"; "lookup and SIP primarily improve cyclic queries and have
+little impact on acyclic queries"), with JOB's gains coming from their hash-table
+structure and Bloom-filter SIP, neither implemented here; TPC-H SF1 has little
+skew. Cyclic queries deterministically fall back to native (no Expand3). No
+mis-selection means no regression -- the robustness property holds. Finding
+recorded in TESTING.md; no source or benchmark-result change. Uncommitted.
+
 ## 2026-11-23 - Selectable Diamond Expand cost models and blow-up-robust selection
 
 Diagnosed and fixed why the automatic planner barely preferred Diamond on the

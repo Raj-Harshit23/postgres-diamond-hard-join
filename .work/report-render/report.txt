@@ -1,0 +1,350 @@
+                   In this section, we discuss the intuition behind Lookup & Expand                            We present the operators in produce/consume [31] pseudocode:
+                   (L&E) decomposition and how this technique leads to more robust
+                                                                                            1 def lookup_consume ( produce , tuple , hashTable ):
+                   query plans. We start by discussing the difficulty of ordering joins     2   # Look for the key in the hash table
+                   and then describe how L&E decomposition addresses this difficulty.       3   iterator = hashTable . find ( tuple . key )
+                                                                                            4   if iterator . done ():
+                 3.1 Making Join Ordering Robust                                            5      return
+                                              Diamond-Hardened Hash Joins in PostgreSQL
+                 In a first approximation, query optimizers minimize total data move-
+                                                                                            6
+                                                                                            7
+                                                                                                # Return tuple and iterator over matches
+                                                                                                produce ( tuple , iterator )
+                 ment, which can be approximatedCS631    Midterm
+                                                     by the         Report: Executor
+                                                            sum of intermediate  result Implementation
+                                                                                            8            and Microbenchmark
+                 sizes of operator (a.k.a. the 𝐶𝑜𝑢𝑡 cost function [11]). If a highly        9 def expand_consume ( produce , tuple ):
+                 selective filter is executed at the endHarshit   Raj(topSumedh
+                                                         of a query               SS Kabir10S Prakash
+                                                                          of the query          # Extract Harshul  Suthar from the tuple
+                                                                                                             the iterator
+                                                                                                currentMatch    = tuple . iterator
+                 plan), the optimizer tries to push the 23B0950
+                                                          filter down as 23B1079          23B1036            23B0968
+                                                                                           11
+                                                                          far as possi-    12   do : # Loop over all matches
+                 ble, so that fewer tuples are propagated all the way up the plan.         13      produce ( tuple , * currentMatch )
+                 In essence, the optimizer pushes down shrinking operators that            14      currentMatch . step ()
+               Abstract.    A sequence of binary joins can generate millions of
+                 produce a smaller output than their input and pushes up growing
+                                                                                           2.
+                                                                                           15 The   paper’s
+                                                                                                while         Lookup–Expand
+                                                                                                       not currentMatch    . done () idea
+               intermediate    tuples
+                  operators that        evenawhen
+                                   produce      largerits inputthan
+                                                       output    relations    and final
+                                                                      their input.       result
+                                                                                   This gives               The paper separates the two tasks hidden inside a hash probe.
+               areussmall.   We implement
+                      the following              the Lookup–Expand
+                                       rule of thumb:    An optimizer tries  decomposition
+                                                                               to push down                 Lookup finds the first equality match.Expand       If none exists, it discards
+               of Birler   et al. [1]operators
+                  cheap shrinking     in PostgreSQL’s
+                                                 and push upexecutor.
+                                                              growing Lookup
+                                                                          operators.tests for a
+                                                                                                            the input tuple. Otherwise it returns one head: the currently
+               matchBinary
+                       and retains    an iterator;
+                              hash joins             Expand
+                                          build a hash         enumerates
+                                                         table on  one input andmatches
+                                                                                    probe only
+                                                                                           the
+                                                                                            2.              available tuple values   ⨝ together ≡ with Lookup an iterator describing de-
+               after
+                  hashsubsequent      lookups
+                         table with the           have removed
+                                          other input,    producing unsuccessful
+                                                                       all matching pairsheads.
+                                                                                                            ferred matches. R    Expand   R2 R1 R2 iterator and emits each
+                                                                                                                                             consumes       that
+               TheThe   hash table buildpreserves
+                     implementation         is expensive.SQLTheduplicate
+                                                                 probe is relatively
+                                                                              semantics cheap.
+                                                                                           and                                     1
+                  However, the probe may be growing or shrinking; each tuple may                            matching     joined   tuple.   Adjacent Lookup and Expand reproduce
+                                                                                                            Figure 2: Binary hash join and equivalent Lookup & Expand.
+               manages the lifetime of deferred hash references. On a deter-                                an ordinary inner hash join, including all duplicates; merely
+                  find zero, one, or many matches in the hash table. Thus, it is hard
+               ministic
+                  to know three-relation
+                             when to pushacyclic
+                                               down a microbenchmark,
+                                                        join; pushing a join thedown recorded
+                                                                                        might                  The Lookup operator checks for a match and produces a single
+                                                                                                            renaming      the operations offers no algorithmic gain.
+               native-to-Diamond        speedups     are  200.99×      and  669.27×
+                  speed up the plan significantly or make it slower. The following      at two              iterator for all matches. The Expand operator uses the iterator from
+                                                                                                               The  gain    comesoverfromallmoving      anWhen
+                                                                                                                                                           independent
+                                                                                                                                                                  using anLookup      before
+               completed     scales. This
+                  code demonstrates           report
+                                         a typical    focuses
+                                                    binary  hashon   the
+                                                                  join  in execution
+                                                                           pseudocode: mecha-               the input to iterate              matches.                       in-memory
+                                                                                                            an  Expand.      In  Figure    2,  R
+                                                                                                            hash-table, the iterator is analogous1 (a, b)  can  probe
+                                                                                                                                                        to a memory span R  (a)  and
+                                                                                                                                                                           2 pointing Rto3 (b)
+               nism1 and
+                      # Hashmicrobenchmark;
+                               table build          broader optimizer integration and
+                                                                                                            using
+                                                                                                            matching hash table entries. In a pipelined query engine [32], thisplan
+                                                                                                                    keys    already    present     in  its head.     The   rightmost
+               evaluation
+                   2 ht = {} are reserved for subsequent work.
+                    3 for k , v in buildInput :                                                             checks
+                                                                                                            attributeboth    relations
+                                                                                                                       is often           before
+                                                                                                                                 not copied         enumerating
+                                                                                                                                               to main   memory; iteither     result.
+                                                                                                                                                                      is simply        If the
+                                                                                                                                                                                  passed
+                   4     ht [ k] = v
+                1. Problem    and applicable queries                                                        second   checktofails,
+                                                                                                            from Lookup              it rejects
+                                                                                                                                Expand           one head
+                                                                                                                                          in a register       and implicitly
+                                                                                                                                                          or cache.  The machineall matches
+                                                                                                                                                                                    code
+                   5
+                6 # Hash table probe
+                                                                                                            saved  by in
+                                                                                                            executed    thethe
+                                                                                                                             first
+                                                                                                                                endcheck.
+                                                                                                                                     will beThe    circled
+                                                                                                                                              exactly        arrow to
+                                                                                                                                                        equivalent   denotes
+                                                                                                                                                                       that ofLookup
+                                                                                                                                                                                a binaryand
+            A binary    hash join builds a hash table on one input and probes
+                7 for k , v in probeInput :
+                                                                                                            hashcircled
+                                                                                                            the   join. IneFigure
+                                                                                                                              denotes2 weExpand;
+                                                                                                                                            show a binary
+                                                                                                                                                      dashedjoin    and connect
+                                                                                                                                                                 links  the equivalent
+                                                                                                                                                                                   deferred
+            it with
+                8    theiterator
+                           other. =Each       probe
+                                        ht . find ( k ) produces
+                                                         # Lookup every matching pair.                      L&E decomposition. The left side of the join is designated as the
+                                                                                                            data to its later expansion.
+            If a9 later ifjoin
+                             notrejects
+                                    iterator  . done
+                                            most   of():those pairs, the database has                       probe side.
+ with Diamond Hardened Joins
+               10
+            already
+               11
+                               do : # Expand
+                      spent timeproducegenerating,      evaluating,
+                                              (k , * iterator    )     and passing a large
+            intermediate
+               12             result.   Figure. step
+                                     iterator     1 illustrates
+                                                       ()          this diamond problem:
+lfons Kemperthe13amount ofwhile        not iterator . done ()
+                                data grows       and
+                                                 Thomasthen shrinks.
+                                                                 Neumann The intermediate
+            need   not
+                   We   be  stored
+                       propose     to in  full;
+                                      split     generating
+                                            binary  hash   join it in a
+                                                                 probes pipeline
+                                                                         into two is already
+                                                                                  subopera-                            ⨝
+ e Universität München                  Technische Universität München                                                  b                               R3
+                                                                                                                  ⨝         R3
+               tors, Lookup and Expand. Lookup finds the first match in the hash
+            expensive.
+mper@in.tum.de                                    neumann@in.tum.de
+                   table. Expand iterates over the rest of the matches. Now, we have                              a
+                                                                                                                                     ≡                          ≡
+                                                                                                                            (b)
+                   two operators that areexcess
+                                           easy to categorize. Lookups are cheap shrink-                     R1       R2                                                            R3
+                                                      smalloperators.
+                                                            output Lookups should be
+uery
+                   ing operators. Expands are growing
+                   pushed down while Expands should be pushed up.
+                                                                                                            (a,b)     (a)                 R1      R2                  R1      R2
+                                                                                                            Figure 3: Threeway join, equivalent Lookup & Expand, and
+ders               2 There are, of course, many variants to the binary hash join. We focus on the build &   Figure 2: Binary joins (left), decomposition (middle), and Lookup
+                                                             large intermediate result                      Lookup pushdown.
+wing               probe variant, commonly preferred in modern relational systems for its performance.      pushdown (right). Reproduced from [1], Figure 3.
+n by
+                         time
+
+
+
+
+uces                                                         small input
+                                                                                                          This reordering is legal only when the next lookup key is
+ kely                                                                                                  available in the head: deferred values cannot be read as ordi-
+                                         produced data
+   the                                                                                                 nary columns before expansion. For general α-acyclic joins, the
+                                                                                                  3219
+   the                                                                                                 paper constructs a two-phase plan using GYO ear removal, suc-
+             Figure
+                Figure1:1:The   diamond
+                             Small   input and problem:
+                                                  output can  Queries
+                                                                 conceal with
+                                                                           a largesmall   inputs
+                                                                                   intermediate.
+oads,                                                                                                  cessively attaching a relation through its shared join attributes.
+             and   outputs from
+                Reproduced     may [1],
+                                      produce
+                                          Figure large
+                                                   1.       intermediate results.
+ JOB.                                                                                                  Nested deferred state carries these reductions through larger
+ , we        runtimes     are therefore
+                   The opportunity         not justified
+                                         arises  in chains,  bysuch
+                                                                 theirasresults:
+                                                                         X(a, b)The▷◁ Yslowness
+                                                                                        (b, c) ▷◁      trees. Lookup performs the shrinking phase; Expand recon-
+ join        of Z(c,
+                query d),execution
+                           when fanoutis often  notedge
+                                           on one      intrinsic   to queries
+                                                            is rejected         themselves,
+                                                                          by another;         but
+                                                                                        in stars,      structs complete result tuples afterwards. Cyclic joins require
+wing         rather
+                wherea aresult  of tuple
+                           central   inefficiencies
+                                           is checkedinagainst
+                                                            how joins     arerelations;
+                                                                     several    performed  andand
+                                                                                                in     additional machinery such as the paper’s ternary Expand3, out-
+  izer,      optimized.     We visualize
+                longer acyclic                this problem
+                                   trees, where       a distantinrelation
+                                                                      Figureeliminates
+                                                                               1, where the    in-
+                                                                                           other-      side this report’s implementation scope.
+  rob-       termediate     results matches.
+                                      of a query     haveshapes
+                                                              a diamond
+                wise productive                   These               aloneshape,
+                                                                             do notwith     small
+                                                                                      guarantee        3. PostgreSQL execution
+ Past        inputs  comingThe in, growing     into large intermediate         results,followed
+                                                                                        and then
+                a speedup.          relevant combination          is many matches
+  y to       shrinking    back  to  the  actual   output.    Such    queries  occur  in  real life,    PostgreSQL uses demand-pull execution: each plan node re-
+                by substantial rejection. A primary-key lookup with at most
+have         in one
+                relational                                                                             turns one tuple whenever its parent asks for the next one. A
+                     matchbenchmarks         like JOBto
+                              has little expansion        [26]  and while
+                                                            avoid,    graph abenchmarks      such
+                                                                                genuinely large
+ that        as final
+                 LDBC    SNB BI   [42],   Graphalytics       [23], and CE [9].                         normal Hash Join first reads one input and builds a hash table.
+                      output   must    still be enumerated.
+ that            Let us give an example from healthcare informatics of a query                         For every tuple from the other input, it computes the join key,
+n be               For intuition, consider patients joined with administered
+             exhibiting the diamond problem. We want to find patients who
+                drugs and a relation of interacting drug pairs: most generated                         finds the corresponding bucket, and returns matching tuples one
+d ap-        have been administered two drugs which have a known adverse                               at a time. It normally continues through all matches immedi-
+ared            pairs may fail the final interaction check. Such application pat-
+             interaction. To compute the query, we might first find all pairs of                       ately, so a high-fanout join can produce a large stream before
+500x            terns motivate the paper’s broader treatment, including cyclic
+             drugs that have been administered to the same patient, then filter                        the next join gets a chance to filter it.
+B.              predicates. Our demonstrated scope here is serial inner hash
+             the pairs that have a known interaction. Or, we might find drugs
+                equijoins with retained hash builds resident in memory.
+             that have been administered to one patient, find all other drugs
+             that have known interactions, and then check if the patient has
+             also been administered the interacting drugs. Regardless of our 1
+ 2024.
+             approach, the intermediate results may be quite large, potentially
+   Our implementation represents Lookup and Expand as sepa-              special tuple and the N − 2 tuples with c = 3. Lookup into X
+rate executor nodes. Lookup uses PostgreSQL’s existing hash              rejects that entire high-fanout group because its b ≥ 3 values are
+table and equality checks, but stops after finding the first real        absent from X. Only the special head reaches the two Expands,
+match. It saves the input tuple and its current position in              yielding one row. At N = 5,000, this avoids generating the
+the bucket, then returns the surviving head. This lets another           native plan’s 24,985,001 intermediate pairs: the first lookup
+Lookup test that head before any remaining matches are gener-            carries 4,999 heads, then the second leaves one. Under the usual
+ated. Expand later returns the saved first match and resumes the         hash-table assumptions, dominant work changes from quadratic
+same bucket position until it is exhausted. Each call to Expand          intermediate enumeration to linear build/probe work for this
+returns one joined tuple and saves its position. When the parent         family of inputs.
+asks for another tuple, Expand advances to the next matching
+hash-table entry. A head with k matches therefore takes k calls          5. Recorded results and demonstration
+and returns all k rows, including duplicates.                            Table 1 reports the optimized-build checkpoint 51f18a8781,
+Live plan evidence. The requested EXPLAIN ANALYZE on the                 documented in the repository’s testing ledger. Completed pairs
+N = 5,000 fixture produced the following compact excerpt                 use a result-bag comparison as warmup followed by three inter-
+(brackets show actual rows; this is one demonstration run, not           leaved EXPLAIN ANALYZE runs; reported times are execution
+the medians in Table 1):                                                 medians. The native and Diamond settings otherwise match.
+                                                                         The recorded selected Diamond plans execute two Lookups and
+     Native Hash Join [1 row]
+     Hash Join XY [24,985,001 rows]                                     two Expands, with no fallback or temporary blocks written.
+     Execution: 2146.301 ms
+     Diamond Join [1 row; fallback: false]                                             N Native (ms) Diamond (ms) Speedup
+     Expand [1] -> Expand [1]
+     Lookup X.b=Y.b [1]
+                                                                                   1,000       212.040           1.055 200.99×
+     Lookup Y.c=Z.c [4,999]                                                        5,000     2,625.554           3.923 669.27×
+     Execution: 3.101 ms                                                          50,000       timeout          30.785       –
+                                                                         Table 1: Recorded PostgreSQL microbenchmark medians. Native
+The native lower join sends 24,985,001 tuples to its parent
+                                                                         exceeded 120 seconds at N = 50,000; no paired speedup is assigned.
+before one survives. Diamond’s first Lookup sends 4,999 heads
+to the next check; that check leaves one, so both Expands are               Both completed scales have identical result bags. At N =
+asked to produce only the single surviving result.                       50,000, the native timeout prevents a completed paired compar-
+   No new index or hash-table format is introduced. EXPLAIN              ison; the Diamond timing is reported separately. These large
+shows Lookup and Expand as plan nodes, while unsupported                 speedups demonstrate avoided work on a deliberately adverse
+or nonresident cases continue to use PostgreSQL’s ordinary               input distribution. They are not a prediction of average speedups
+join plan. The demonstrated implementation uses serial, single-          on ordinary workloads or a reproduction of Umbra’s timings.
+batch hash tables so that a saved bucket position remains avail-         In-memory inputs can still create quadratic CPU work, so small
+able until its Expand runs.                                              resident hash tables do not make this case trivial.
+4. Microbenchmark: why expansion is wasted                                  The live demo uses N = 5,000 and identical SQL with
+                                                                         diamond_acyclic=off, then with diamond_acyclic=on and
+We use a deterministic instance of X(a, b), Y (b, c), and Z(c, d):       diamond_acyclic_force=on. EXPLAIN ANALYZE shows in-
+                                                                         termediate row counts, the Lookup/Expand nodes, and elapsed
+              X = {(1, 1)} ∪ {(i, 2) : 1 ≤ i ≤ N},                       execution time. Forcing makes the execution mechanism repro-
+              Y = {(1, 1)} ∪ {(2, c) : 4 ≤ c ≤ N}                        ducible; it does not bypass semantic or memory checks. The
+                  ∪ {(b, 3) : 3 ≤ b ≤ N},                                stored measurements above come from the recorded selected
+              Z = {(1, 1)} ∪ {(3, i) : 1 ≤ i ≤ N}.                       plans, not a new forced-demo measurement.
+
+                                                                         6. Scope and next steps
+Both X and Z contain N + 1 rows; Y contains 2N − 4 rows. The
+query returns every matching tuple, without aggregation:                 The midterm establishes the executor mechanism and its benefit
+                                                                         on the acyclic microbenchmark. Subsequent work will present
+     SELECT x.a, x.b, y.c, z.d                                           and evaluate broader planner integration: choosing legal sched-
+     FROM X x JOIN Y y ON x.b = y.b
+                                                                         ules and calibrating costs so that Diamond is selected where
+     JOIN Z z ON y.c = z.c;
+                                                                         it helps. JOB and TPC-H will assess coverage and end-to-end
+  Joining X and Y first produces N(N − 3) + 1 rows: N rows               gains. The central result here is specific: delaying expansion
+with b = 2 each match N − 3 rows of Y . None of these matches            allows later joins to reject whole groups of matches before
+has a c present in Z. Starting with Y ▷◁ Z also grows to N(N −           PostgreSQL pays to enumerate them.
+2)+1 rows, whose b ≥ 3 values are absent from X. Thus simply             Reference
+reversing the two binary joins does not remove the problem.              [1] A. Birler, A. Kemper, and T. Neumann. Robust Join Processing
+Only (1, 1, 1, 1) survives all predicates.                               with Diamond Hardened Joins. PVLDB 17(11):3215–3228, 2024.
+  Diamond builds hashes on X.b and Z.c and scans Y . In                  doi:10.14778/3681954.3681995. Figures reproduced from the supplied
+the recorded plan, Lookup into Z retains N − 1 heads: the                paper (CC BY-NC-ND 4.0).
+
+
+                                                                     2
+

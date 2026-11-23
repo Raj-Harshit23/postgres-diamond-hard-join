@@ -191,6 +191,97 @@ focused `diamond_hashjoin` 1/1 and full core 240/240 pass as before; pgindent
 and `git diff --check` are clean. Raw clusters live in the ignored
 `.work/data-verify`; stop the server with `pg_ctl -D "$data" -m fast -w stop`.
 
+## TPC-H SF1 and JOB cost-model survey (2026-11-23)
+
+EXPLAIN-only survey (no execution: zero temp I/O, trivial memory) against the
+preserved Data-disk cluster `.work/bench-data` (tpch_sf1 and job_cloud already
+loaded; the Data disk is rotational, so both modes read the same HDD and the
+native-vs-Diamond comparison is apples-to-apples). Server started with
+`shared_buffers=1GB`, queries run at `work_mem=64MB`, `hash_mem_multiplier=2`.
+
+Diamond is NOT selected on any TPC-H or JOB query under any cost model:
+
+| Suite | queries | generate a candidate | selected under blowup_robust | selected under underestimate |
+| --- | --- | --- | --- | --- |
+| TPC-H SF1 | 22 | 4 (Q3, Q8, Q9, Q10) | 0 | 0 |
+| JOB | 113 | 105 | 0 | 0 |
+
+Example Diamond-candidate costs versus native (native wins every time):
+
+| Query | Diamond cost | Native cost | native cheaper by |
+| --- | --- | --- | --- |
+| TPC-H Q3 | 355,075 | 257,390 | 1.4x |
+| TPC-H Q9 | 471,570 | 37,250 | 12.7x |
+| JOB 1a | 252,049 | 19,540 | 12.9x |
+| JOB 10a | 1,148,009 | 45,897 | 25x |
+| JOB 16a | 2,173,380 | 3,797 | 572x |
+
+Interpretation. The result is consistent with Birler et al.: on JOB the paper
+reports that Lookup & Expand (their "lookup") and SIP "do not result in
+significant improvements or regressions", and that "lookup and SIP primarily
+improve cyclic queries and have little impact on acyclic queries"; JOB's measured
+gains come from their hash-table structure ("ht") and Bloom-filter SIP, neither
+of which this project implements. TPC-H SF1 has "little to no skew" and no diamond
+blow-up. Two PostgreSQL-specific reasons reinforce this: (1) native uses cheap
+indexed nested-loop / parallel plans on these selective joins, while the Diamond
+arm is serial seq-scan + hash, so it cannot compete on cost; (2) the big L&E wins
+in the paper's CE benchmark are mostly cyclic, needing Expand3, which this project
+does not implement (cyclic queries deterministically fall back to native: a
+triangle `r&#8904;s&#8904;t` closing edge yields a native Hash Join, no Diamond).
+The cost models never mis-select here, so there is no regression -- the robustness
+property holds. Diamond's demonstrated win remains the constructed acyclic
+microbenchmark (large filtered intermediate over hash-joinable inputs).
+
+Forced-execution check (is the cost model wrongly rejecting a real win?). With
+`diamond_acyclic_force=on` the Diamond plan was executed and timed against native
+on JOB, warm, best of three runs (`statement_timeout=90s`): JOB 1a native
+63.95ms vs forced Diamond 1016.68ms (16x slower); JOB 2a native 597.25ms vs
+1459.05ms (2.4x slower). So even forced, Diamond is materially slower than
+native on JOB -- the cost model's rejection is correct, not a false negative.
+Caution confirmed: an unwarmed first measurement reported Diamond "faster" purely
+because native ran cold from the rotational disk (6.7s) and Diamond ran warm from
+page cache (0.06s); always warm the cluster and take best/median of several runs
+before comparing, or the HDD/cache difference dominates the result.
+
+## STATS-CEB: first real-benchmark Diamond selection and speedup (2026-11-23)
+
+STATS-CEB (Han et al., PVLDB 2022, "Cardinality Estimation in DBMS") is a
+real-world benchmark built to stress PostgreSQL's estimator with skew and
+correlation. Its simplified STATS (Stack Exchange) dataset is small (~50MB:
+posts 91,976; votes 328,064; comments 174,305; badges 79,851) and its 146
+queries are `SELECT COUNT(*)` multi-table inner-equijoins -- Diamond-eligible,
+and (unlike JOB) joined on non-PK columns so native must hash-join. Loaded into
+the debug build with the benchmark's standard FK indexes; queries from
+`workloads/stats_CEB/stats_CEB.sql` (`<true_card>||<SQL>`). Private cluster at
+`work_mem=256MB, hash_mem_multiplier=2`. Repo cloned to the ignored
+`.work/stats-ceb`.
+
+Under `diamond_cost_model=blowup_robust`, 136/146 queries generate a candidate
+and the planner AUTOMATICALLY selects Diamond on 4 (Q7, Q8, Q37, Q121) at the
+default threshold 10 -- the first automatic selection on a real benchmark (JOB
+and TPC-H selected zero). Correctness holds: every selected query returns the
+identical count to native and to the published true cardinality (Q7 699,302;
+Q8 481,420; Q37 1,633,681; Q121 1,116,000).
+
+Warm best-of-three execution (`statement_timeout=120s`):
+
+| Query | native (ms) | Diamond (ms) | result |
+| --- | --- | --- | --- |
+| Q8 | 232.577 | 106.195 | Diamond 2.19x faster |
+| Q7 | 146.010 | 143.380 | tie (1.02x) |
+| Q121 | 188.071 | 215.327 | Diamond 1.15x slower |
+| Q37 | 151.074 | 410.838 | Diamond 2.70x slower |
+
+Q8 is a genuine 2.19x win with the identical result. Its native plan is an index
+nested loop doing 9,405 loops of an index scan on `comments` (481,420 probes);
+the Diamond plan builds the hash once and its two Lookups filter the heads to
+~5,741 before Expand, avoiding the repeated probing. Raising
+`diamond_blowup_threshold` to 50 (a run-time GUC, no rebuild) drops Q37 -- the
+worst regression -- back to native while keeping the Q8 win; Q121 remains a minor
+regression. So the cost model finds and accelerates real diamonds but is not yet
+perfectly calibrated on borderline count(*) queries (future work). Resource-safe:
+STATS is ~50MB and stayed on the local disk; no crash, SSD budget untouched.
+
 ## Live reproducible TPC-H run
 
 The local SF1 database is `scripts/diamond-pg/.work/bench-data`; generated
