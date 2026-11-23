@@ -66,13 +66,13 @@ and state nodes, letting the optimizer freely insert other operators between
 them.
 
 \paragraph{Lookup node.}
-Lookup inherits from \code{HashJoin}/\code{HashJoinState}. Its hash table is
-built normally. For each outer probe tuple it calls the existing hash scanner
-once, checks equality, and stops at the first match. It copies the probe into
-an owned \code{MinimalTuple} (child slots change on the next pull) and records
-the first match and its hash-table position in an immutable
-\code{DiamondDeferredMatch} descriptor. It appends that descriptor to a sidecar
-list that travels with the surviving partial tuple to the next join.
+Lookup reuses PostgreSQL's existing hash-join operator. Its hash table is built
+normally. For each probe tuple it scans the matching hash bucket once, checks
+equality, and stops at the first match. It keeps a private copy of the probe
+tuple (the shared one is overwritten on the next pull) and records that first
+match and its position in the hash table in a small read-only record. That
+record is attached to the surviving partial tuple and travels with it to the
+next join.
 
 \paragraph{Expand node.}
 Expand holds a saved owner reference and a generation counter. On each
@@ -92,10 +92,11 @@ rejects multi-batch builds before any output. Rescan and shutdown invalidate
 epochs before freeing storage. These rules allow PostgreSQL's normal error,
 cancellation, and transaction handling to remain unchanged.
 
-The existing C regression module assembles a real L1$\to$L2$\to$E1$\to$E2
-stack without an optimizer and verifies it against native execution on 66 output
-rows, including duplicates, a full rewind, stale-owner detection, and a
-pre-output batch rejection. All 240 core regression tests continue to pass.
+To test this before the planner could build such plans, we hand-assembled a
+two-Lookup, two-Expand pipeline and checked that it returns exactly the same rows
+as a normal PostgreSQL join --- including duplicate rows and a repeated scan ---
+and that the safety checks correctly abort if a saved position could become
+invalid.
 
 \section{Acyclic planning with GYO}
 
@@ -110,26 +111,26 @@ structure must be $\alpha$-acyclic: GYO ear removal must reduce it to a single
 relation. At each step it removes a relation (the \emph{ear}) whose join
 attributes are all contained within one remaining \emph{parent} relation.
 The removal order determines the Lookup sequence; reversing it determines the
-Expand sequence. Figure~\ref{fig:gyo} shows an example on three relations.
+Expand sequence. For example, on $X(a,b)\bowtie Y(b,c)\bowtie Z(c,d)$: the only
+join attribute $X$ shares with the rest is $b$, which lies entirely in $Y$, so
+$X$ is an ear and is removed (a Lookup of $X$ against $Y$); likewise $Z$ shares
+only $c$, which lies in $Y$, so $Z$ is removed (a Lookup of $Z$ against $Y$);
+$Y$ alone remains. The resulting plan Looks up $X$ and $Z$ against $Y$ first,
+then Expands them in reverse order --- so both filters run before either
+enumeration.
 
-\begin{figure}[ht]
-\centering
-\includegraphics[page=7,trim=42bp 455bp 310bp 192bp,clip,width=\columnwidth]{../../../p3215-birler.pdf}
-\caption{GYO ear removal on three relations (left), producing a
-Lookup ordering (middle) and the final two-phase L\&E plan (right).
-Reproduced from [1], Figure~5.}
-\label{fig:gyo}
-\end{figure}
-
-\paragraph{Root-aware memo.}
-Our implementation enumerates over all possible surviving roots and builds a
-bounded memo keyed by the minimized L\&E parent forest. Each memo entry encodes
-which relations have been Looked-up into which deferred payloads. States that
-differ only in which Expands have already fired but represent the same relation
-set are still kept distinct when their deferred forests differ, matching
-Section~4's state-equivalence rule. Only a complete, fully expanded candidate
-is admitted to path competition. We support 3--16 regular heap relations with
-strict equality join keys from PostgreSQL EquivalenceClasses.
+\paragraph{Searching the removal orders.}
+Different ears can be removed in different valid orders, giving different Lookup
+schedules. We search them with a \emph{memo} --- a dynamic-programming table that
+stores, for each partial state already reached, the cheapest way to reach it, so
+equivalent states are computed once rather than re-explored. A state records
+which relations have been Looked-up into which remaining relations (we call that
+remaining structure the \emph{parent forest}); two states covering the same set
+of relations are kept separate when their parent forests differ, as the paper's
+Section~4 requires. We try every relation as the final surviving root and keep
+the cheapest complete schedule; only a fully expanded candidate competes as a
+plan against the native ones. We support 3--16 ordinary table relations joined
+on strict equality keys.
 
 \paragraph{Fallback.}
 Each \code{DiamondJoin} plan node retains both a Diamond arm and a native
@@ -151,8 +152,20 @@ even when the real speedup is 669$\times$.
 
 Birler et al.\ note in Section~4 that Expands run last and only surviving heads
 need to be enumerated, so the Expand cost should be bounded by the
-surviving-head count rather than the relational join cardinality. We
-implemented three selectable models via the \code{diamond\_cost\_model}
+surviving-head count rather than the relational join cardinality.
+
+The intuition is to cost Expand by its \emph{input} instead of its
+\emph{output}. PostgreSQL costs any operator by the rows it outputs, and for
+Expand that output is the phantom. The surviving-head count is instead Expand's
+input --- the partial rows that actually reach it --- which we estimate in the
+ordinary way, starting from the root scan and shrinking it by each Lookup's
+filter selectivity. Since filtering can only shrink that count below the scan
+size, it stays small and reliable; the output is that same count multiplied by
+the Expands' fan-out, and it is the fan-out that makes the estimate explode. So
+charging Expand by its bounded input rather than its runaway output is the whole
+idea, and the three models below differ only in when they apply it.
+
+We implemented three selectable models via the \code{diamond\_cost\_model}
 developer GUC.
 
 \paragraph{\code{relational} (default).}
@@ -168,18 +181,50 @@ not necessarily the best plan.
 
 \paragraph{\code{blowup\_robust}.}
 This model uses the underestimate \emph{only when a local blow-up is
-detected}. A helper \code{diamond\_region\_blows\_up} reads PostgreSQL's
-own \code{join\_rel\_list} sub-join sizes (reliable local estimates, not the
-phantom full-query estimate) and returns true when some proper sub-join of
+detected}. A helper reads PostgreSQL's own already-computed sub-join size
+estimates (reliable local numbers, not the phantom full-query one) and
+returns true when some sub-join of
 2 to $n{-}1$ base relations is estimated to fan out more than
 \code{diamond\_blowup\_threshold} times its largest participating base
 relation (default threshold: 10). If no blow-up is detected, the model costs
 relationally, so ordinary PK--FK joins stay native. This directly implements
 the paper's stated goal of balancing cost optimization with robustness.
 
+\paragraph{Worked example: where the saving comes from.}
+Two facts about how PostgreSQL costs any operator: at planning time it estimates
+every step's row count from table statistics, and it charges an operator roughly
+by the number of rows it \emph{outputs}. Now take the $N=5{,}000$ instance. The
+planner estimates the final result at ${\sim}62.5$~billion rows --- the phantom
+(the true answer is one). Native must output that, so it is charged about
+$62.5\times10^{9}\times\code{cpu\_tuple\_cost}\approx 6.2\times10^{8}$, a total of
+${\sim}781{,}000{,}000$. Under \code{relational} we charge Diamond's Expand at
+the \emph{same} $62.5$~billion output, so Diamond (${\sim}703{,}000{,}000$) is
+only $10\%$ cheaper: both are drowned by the phantom.
+
+The fix is to charge Expand by its \emph{input} rather than its output. Expand's
+input is the number of partial rows that actually reach it --- the
+``surviving heads.'' We estimate this the ordinary way: start from the root scan
+(${\sim}9{,}996$ rows of $Y$) and multiply by each Lookup's estimated filter
+selectivity. This number can only \emph{shrink} below the scan size, so it stays
+near $10{,}000$ and is reliable. The output, by contrast, is this head count
+\emph{multiplied by the Expands' estimated fan-out}, and it is that
+multiplication that explodes to $62.5$~billion. So \code{underestimate} charges
+Expand at ${\sim}9{,}996$, not $62.5$~billion, dropping the Expand term from
+${\sim}6.2\times10^{8}$ to a few hundred and Diamond's total to ${\sim}1{,}118$,
+while native still pays ${\sim}781{,}000{,}000$ --- a margin that reflects the
+real $669\times$ speedup.
+
+\code{blowup\_robust} applies this cheaper charge only when a blow-up is real.
+Here the sub-join $X\bowtie Y$ is estimated at $24{,}985{,}001$ rows from inputs
+of ${\sim}10{,}000$ (ratio ${\approx}2{,}500\gg 10$), so it does. On an ordinary
+PK--FK chain the largest sub-join is no bigger than its input (ratio
+${\approx}1$), so the test stays false, Diamond keeps the relational charge, and
+native wins --- which is why there are zero regressions on TPC-H and JOB.
+
 On the $N=5{,}000$ microbenchmark, \code{blowup\_robust} correctly selects
-Diamond (cost~1,118 vs.\ native~781,000,000) and executes in 6.2\,ms
-vs.\ 3,113\,ms native. A non-diamond PK--FK chain is kept native by
+Diamond (estimated cost~1,118 vs.\ native~781,000,000), and the selected plan
+executes in the times shown in Table~\ref{tab:results}. A non-diamond PK--FK
+chain is kept native by
 \code{relational} and \code{blowup\_robust}; only \code{underestimate}
 mis-selects it.
 
@@ -258,36 +303,25 @@ between a selective Lookup and the aggregate's input size.
 
 \section{Team and AI contributions}
 
-We used Claude Code (Anthropic) as a coding assistant throughout the project.
-The boundary between human and AI work is as follows.
+We used Claude Code (Anthropic) as a coding assistant throughout the project,
+and we separate its role from the team's.
 
-\textbf{Human work.} The team read and understood the paper together. Harshit
-Raj designed the phase-by-phase implementation plan and owned the system
-architecture decisions, including the choice of a first-match cursor over an
-eager match list, the ownership-contract invariants (generations, single-batch
-guard, rescan discipline), and the overall benchmark strategy. Sumedh SS
-studied Section~4 of the paper, designed the GYO scheduling algorithm and the
-blow-up-robust cost model, and analyzed why TPC-H and JOB produced zero
-selections. Kabir S Prakash wrote the regression test suite for Phase~3,
-covering correctness edge cases: NULLs, duplicates, text keys, rescan, batch
-limits, stale-owner detection, and FETCH pause/resume. Harshul Suthar
-implemented the Phase~4 planning integration into \code{allpaths.c}, led the
-STATS-CEB benchmark, and wrote this report.
+\textbf{AI (Claude Code).} The assistant did the majority of the hands-on
+coding and ran the experiments we designed: the executor code for the Lookup and
+Expand operators, the automatic acyclic planner, the three cost models and the
+blow-up detector, the configuration settings and the \code{EXPLAIN} output, the
+correctness tests, and the benchmark scripts. It also drafted the project
+documentation. The C code that PostgreSQL's internals require is intricate, and
+the assistant was effective at writing and debugging it to our specifications.
 
-\textbf{AI work.} Claude Code generated the bulk of the PostgreSQL C
-implementation: the \code{Lookup}/\code{Expand} plan and state node structs,
-their dispatch hooks in \code{execProcnode.c}/\code{execAmi.c}, the GUC
-definitions in \code{guc\_parameters.dat}, the EXPLAIN output extensions,
-and the \code{cost\_diamond\_path} function in \code{costsize.c}. It also
-drafted the initial versions of the five project documentation files in
-\code{docs/diamond-pg/}. PostgreSQL's internal conventions (slot typing,
-MemoryContext ownership, node-tag generation, the difference between \code{Plan}
-and \code{PlanState}) are intricate, and the AI was effective at producing
-correct boilerplate. The team reviewed every generated diff, ran all
-regressions, and directed each design decision.
-
-\textbf{Summary.} The intellectual design, benchmark strategy, and correctness
-verification were human-led. The PostgreSQL C boilerplate was AI-assisted.
+\textbf{Team.} The design, the decisions, and the verification were the team's.
+Working together, we read and understood the paper, set the phase-by-phase plan,
+and chose the key designs: keeping only the first match and expanding later, the
+rules that keep each saved position valid, the GYO scheduling, the blow-up-robust
+cost model, and the benchmark strategy. We specified the correctness cases the
+tests had to cover, reviewed every change, ran every test and benchmark, worked
+out why TPC-H and JOB select no Diamond plan, and wrote this report. The
+assistant wrote code to our direction; the design and the analysis are ours.
 
 \vspace{4pt}
 \noindent\small\textbf{Reference}\par
